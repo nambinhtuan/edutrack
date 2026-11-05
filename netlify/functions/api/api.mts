@@ -95,7 +95,26 @@ route("POST", "/api/logout", async (c) => {
   return json({ ok: true }, { headers: { "Set-Cookie": clearCookie() } });
 });
 
-route("GET", "/api/me", async (c) => json({ user: c.user }));
+// Các lớp mà người dùng là giáo viên chủ nhiệm.
+async function homeroomClassIds(userId: number): Promise<number[]> {
+  return (await db.select({ id: classes.id }).from(classes).where(eq(classes.homeroomTeacherId, userId))).map((r) => r.id);
+}
+// Quản trị viên hoặc giáo viên chủ nhiệm (trả về danh sách lớp chủ nhiệm; null = quản trị, không giới hạn).
+async function requireAdminOrHomeroom(c: Ctx): Promise<{ u: SessionUser; homeroom: number[] | null }> {
+  const u = requireUser(c);
+  if (u.role === "admin") return { u, homeroom: null };
+  if (u.role === "teacher") {
+    const ids = await homeroomClassIds(u.id);
+    if (ids.length) return { u, homeroom: ids };
+  }
+  return fail(403, "Chỉ quản trị viên hoặc giáo viên chủ nhiệm mới có quyền này.");
+}
+
+route("GET", "/api/me", async (c) => {
+  if (!c.user) return json({ user: null });
+  const isHomeroom = c.user.role !== "parent" && (await homeroomClassIds(c.user.id)).length > 0;
+  return json({ user: { ...c.user, isHomeroom } });
+});
 
 route("POST", "/api/change-password", async (c) => {
   const me = requireUser(c);
@@ -111,14 +130,14 @@ route("POST", "/api/change-password", async (c) => {
 // ---------- Lớp học ----------
 
 route("GET", "/api/classes", async (c) => {
-  requireAdmin(c);
+  const { homeroom } = await requireAdminOrHomeroom(c);
   const rows = await db.select({
     id: classes.id, name: classes.name, schoolYear: classes.schoolYear, homeroomTeacherId: classes.homeroomTeacherId,
     homeroomTeacherName: users.fullName,
     studentCount: sql<number>`(select count(*)::int from ${students} where ${students.classId} = ${classes.id})`,
   }).from(classes).leftJoin(users, eq(users.id, classes.homeroomTeacherId))
     .orderBy(sql`${classes.schoolYear} desc`, asc(classes.name));
-  return json(rows);
+  return json(homeroom ? rows.filter((r) => homeroom.includes(r.id)) : rows);
 });
 
 async function validTeacherId(v: unknown): Promise<number | null> {
@@ -302,10 +321,16 @@ const studentCols = {
 };
 
 route("GET", "/api/students", async (c) => {
-  requireAdmin(c);
+  const { homeroom } = await requireAdminOrHomeroom(c);
   const classId = c.url.searchParams.get("classId");
   const q = db.select({ ...studentCols, className: classes.name, schoolYear: classes.schoolYear })
     .from(students).leftJoin(classes, eq(classes.id, students.classId));
+  if (homeroom) {
+    // Giáo viên chủ nhiệm: chỉ học sinh lớp mình.
+    const ids = classId && classId !== "none" ? [intParam(classId)].filter((x) => homeroom.includes(x)) : homeroom;
+    if (!ids.length) fail(403, "Bạn không chủ nhiệm lớp này.");
+    return json(sortByVietnameseName(await q.where(inArray(students.classId, ids))));
+  }
   const rows = classId === "none" ? await q.where(sql`${students.classId} is null`)
     : classId ? await q.where(eq(students.classId, intParam(classId))) : await q;
   return json(sortByVietnameseName(rows));
@@ -410,11 +435,15 @@ route("POST", "/api/students", async (c) => {
 });
 
 route("PUT", "/api/students/:id", async (c) => {
-  requireAdmin(c);
+  const { homeroom } = await requireAdminOrHomeroom(c);
   const id = intParam(c.params.id);
+  const [cur] = await db.select({ classId: students.classId }).from(students).where(eq(students.id, id));
+  if (!cur) fail(404, "Không tìm thấy học sinh.");
+  if (homeroom && !(cur.classId && homeroom.includes(cur.classId))) fail(403, "Học sinh không thuộc lớp bạn chủ nhiệm.");
   const { data, errors } = studentInput(c.body);
   if (errors.length) fail(400, "Dữ liệu chưa hợp lệ: " + errors.join("; "));
-  const classId = c.body.classId ? intParam(c.body.classId) : null;
+  // Giáo viên chủ nhiệm không được chuyển lớp học sinh.
+  const classId = homeroom ? cur.classId : c.body.classId ? intParam(c.body.classId) : null;
   try {
     await db.update(students).set({ ...data, classId }).where(eq(students.id, id));
   } catch { fail(409, "Mã học sinh bị trùng."); }
@@ -532,10 +561,17 @@ route("POST", "/api/parents/easy-passwords", async (c) => {
 
 // Cấp lại mật khẩu hàng loạt: theo danh sách tài khoản phụ huynh và/hoặc danh sách học sinh (lấy phụ huynh của các em).
 route("POST", "/api/parents/reset-passwords", async (c) => {
-  requireAdmin(c);
+  const { homeroom } = await requireAdminOrHomeroom(c);
   const toIds = (v: unknown) => (Array.isArray(v) ? v.map(intParam) : []);
+  if (homeroom && toIds(c.body.parentIds).length) fail(403, "Chỉ quản trị viên được chọn theo tài khoản.");
   const parentIds = new Set(toIds(c.body.parentIds));
   const studentIds = toIds(c.body.studentIds);
+  if (homeroom && studentIds.length) {
+    const ok = new Set<number>();
+    for (const part of chunk(studentIds, 500)) for (const r of await db.select({ id: students.id }).from(students)
+      .where(and(inArray(students.id, part), inArray(students.classId, homeroom)))) ok.add(r.id);
+    if (studentIds.some((x) => !ok.has(x))) fail(403, "Có học sinh không thuộc lớp bạn chủ nhiệm.");
+  }
   if (parentIds.size + studentIds.length > 5000) fail(400, "Chọn quá nhiều mục.");
   for (const part of chunk(studentIds, 500)) {
     for (const l of await db.select({ p: parentStudents.parentId }).from(parentStudents).where(inArray(parentStudents.studentId, part)))

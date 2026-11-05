@@ -159,9 +159,11 @@ const NAV = {
   teacher: [["grades", "Sổ điểm"]],
   parent: [["results", "Kết quả học tập"]],
 };
+// Giáo viên chủ nhiệm có thêm mục "Học sinh lớp chủ nhiệm".
+const nav = () => (me.role === "teacher" && me.isHomeroom ? [["grades", "Sổ điểm"], ["students", "Học sinh lớp chủ nhiệm"]] : NAV[me.role]);
 const currentRoute = () => {
-  const r = (location.hash.replace(/^#\/?/, "").split("?")[0]) || NAV[me.role][0][0];
-  return NAV[me.role].some(([k]) => k === r) ? r : NAV[me.role][0][0];
+  const r = (location.hash.replace(/^#\/?/, "").split("?")[0]) || nav()[0][0];
+  return nav().some(([k]) => k === r) ? r : nav()[0][0];
 };
 const hashParams = () => new URLSearchParams(location.hash.split("?")[1] || "");
 
@@ -176,7 +178,7 @@ function renderShell() {
       <button class="btn ghost small" id="out">Đăng xuất</button>
     </header>
     <div class="shell">
-      <nav class="side" id="side">${NAV[me.role].map(([k, label], i) =>
+      <nav class="side" id="side">${nav().map(([k, label], i) =>
         `<a href="#/${k}" data-k="${k}"><span class="num">${String(i + 1).padStart(2, "0")}</span>${esc(label)}</a>`).join("")}</nav>
       <main class="content" id="page"></main>
     </div>`;
@@ -320,13 +322,15 @@ async function viewStudents(page) {
   const params = hashParams();
   const [classList, list] = await Promise.all([api("GET", "/api/classes"), api("GET", "/api/students" + (params.get("classId") ? `?classId=${params.get("classId")}` : ""))]);
   const sel = params.get("classId") || "";
-  page.innerHTML = head("Hồ sơ học sinh", "Nhập danh sách từ Excel – hệ thống tự tạo lớp và tài khoản phụ huynh theo số điện thoại.",
-    `<button class="btn ghost" id="tpl">Tải file Excel mẫu</button><button class="btn ghost" id="add">+ Thêm học sinh</button><button class="btn" id="imp">Nhập từ Excel</button>`) +
+  const isAdmin = me.role === "admin";
+  page.innerHTML = (isAdmin ? head("Hồ sơ học sinh", "Nhập danh sách từ Excel – hệ thống tự tạo lớp và tài khoản phụ huynh theo số điện thoại.",
+    `<button class="btn ghost" id="tpl">Tải file Excel mẫu</button><button class="btn ghost" id="add">+ Thêm học sinh</button><button class="btn" id="imp">Nhập từ Excel</button>`)
+    : head("Học sinh lớp chủ nhiệm", "Xem, sửa hồ sơ học sinh và cấp lại mật khẩu cho phụ huynh lớp bạn chủ nhiệm.")) +
     `<div id="import-area"></div>
     <div class="card"><div class="row" style="margin-bottom:12px">
       <label class="field"><span>Lớp</span><select id="cls"><option value="">Tất cả lớp</option>
         ${classList.map((c) => `<option value="${c.id}" ${String(c.id) === sel ? "selected" : ""}>${esc(c.name)} · ${esc(c.schoolYear)}</option>`).join("")}
-        <option value="none" ${sel === "none" ? "selected" : ""}>Chưa xếp lớp</option></select></label>
+        ${isAdmin ? `<option value="none" ${sel === "none" ? "selected" : ""}>Chưa xếp lớp</option>` : ""}</select></label>
       <label class="field grow"><span>Tìm kiếm</span><input type="search" id="q" placeholder="Tên, mã HS hoặc SĐT…"></label>
       <button class="btn ghost" id="exp">Xuất Excel</button>
     </div><div id="tbl"></div></div>`;
@@ -345,7 +349,7 @@ async function viewStudents(page) {
         <td class="nowrap">${esc(s.dateOfBirth)}</td><td>${esc(s.gender)}</td><td class="nowrap">${s.className ? esc(s.className) : `<span class="tag">Chưa xếp</span>`}</td>
         <td>${esc(s.fatherName)}${s.fatherPhone ? `<br><small class="muted">${esc(s.fatherPhone)}</small>` : ""}</td>
         <td>${esc(s.motherName)}${s.motherPhone ? `<br><small class="muted">${esc(s.motherPhone)}</small>` : ""}</td>
-        <td><div class="actions"><button class="btn ghost small" data-edit="${s.id}">Sửa</button><button class="btn danger small" data-del="${s.id}">Xoá</button></div></td></tr>`).join("")}
+        <td><div class="actions"><button class="btn ghost small" data-edit="${s.id}">Sửa</button>${isAdmin ? `<button class="btn danger small" data-del="${s.id}">Xoá</button>` : ""}</div></td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">Chưa có học sinh nào${q ? " khớp tìm kiếm" : ""}.</div>`;
     if (!rows.length) return;
     $("#sel-all").onchange = (e) => { rows.forEach((s) => (e.target.checked ? selected.add(s.id) : selected.delete(s.id))); drawTable(); };
@@ -356,7 +360,7 @@ async function viewStudents(page) {
   drawTable();
   $("#q").oninput = drawTable;
   $("#cls").onchange = (e) => (location.hash = "#/students" + (e.target.value ? `?classId=${e.target.value}` : ""));
-  $("#tpl").onclick = () => attempt(() => downloadXlsx("EduTrack_mau_nhap_hoc_sinh.xlsx", [
+  if (isAdmin) $("#tpl").onclick = () => attempt(() => downloadXlsx("EduTrack_mau_nhap_hoc_sinh.xlsx", [
     STUDENT_FIELDS.map(([, l]) => l),
     ["HS001", "Nguyễn Văn An", "05/09/2013", "Nam", "6A1", "Thôn 1, xã A", "Nguyễn Văn Bình", "0912345678", "Trần Thị Cúc", "0987654321", ""],
     ["HS002", "Lê Thị Bích", "12/03/2013", "Nữ", "6A1", "Thôn 2, xã A", "Lê Văn Dũng", "0903123456", "", "", "Anh chị em ruột dùng chung SĐT được"],
@@ -364,8 +368,8 @@ async function viewStudents(page) {
   $("#exp").onclick = () => attempt(() => downloadXlsx("EduTrack_danh_sach_hoc_sinh.xlsx", [
     STUDENT_FIELDS.map(([, l]) => l), ...list.map((s) => STUDENT_FIELDS.map(([k]) => s[k] ?? "")),
   ], "HocSinh"));
-  $("#imp").onclick = () => renderImport($("#import-area"), () => viewStudents(page));
-  $("#add").onclick = () => studentForm({ classId: sel && sel !== "none" ? +sel : null }, classList, () => viewStudents(page));
+  if (isAdmin) $("#imp").onclick = () => renderImport($("#import-area"), () => viewStudents(page));
+  if (isAdmin) $("#add").onclick = () => studentForm({ classId: sel && sel !== "none" ? +sel : null }, classList, () => viewStudents(page));
   page.onclick = async (e) => {
     const ed = e.target.closest("[data-edit]"), del = e.target.closest("[data-del]");
     if (ed) studentForm(list.find((s) => s.id === +ed.dataset.edit), classList, () => viewStudents(page));
@@ -383,7 +387,7 @@ function studentForm(s, classList, done) {
     <div class="grid2">${inp("studentCode", "Mã HS", 'placeholder="Để trống để tự sinh"')}${inp("fullName", "Họ và tên", "required")}
     ${inp("dateOfBirth", "Ngày sinh", 'placeholder="dd/mm/yyyy"')}
     <label class="field"><span>Giới tính</span><select name="gender"><option value=""></option>${["Nam", "Nữ"].map((g) => `<option ${s.gender === g ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
-    <label class="field"><span>Lớp</span><select name="classId"><option value="">— Chưa xếp lớp —</option>
+    <label class="field"><span>Lớp${me.role === "admin" ? "" : " (chỉ quản trị viên được chuyển lớp)"}</span><select name="classId" ${me.role === "admin" ? "" : "disabled"}><option value="">— Chưa xếp lớp —</option>
       ${classList.map((c) => `<option value="${c.id}" ${c.id === s.classId ? "selected" : ""}>${esc(c.name)} · ${esc(c.schoolYear)}</option>`).join("")}</select></label>
     ${inp("address", "Địa chỉ")}
     <div class="grid2">${inp("fatherName", "Họ tên bố")}${inp("fatherPhone", "SĐT bố", 'inputmode="tel"')}${inp("motherName", "Họ tên mẹ")}${inp("motherPhone", "SĐT mẹ", 'inputmode="tel"')}</div>
@@ -541,9 +545,12 @@ function renderGradeTable(body, data, ctx, setDirty) {
       <div class="row" style="justify-content:space-between;margin-bottom:12px">
         <div><b>${esc(data.class.name)}</b> · ${esc(ctx.subjectName.replace(" (chỉ xem)", ""))} · Học kỳ ${ctx.semester === 1 ? "I" : "II"} · ${esc(data.class.schoolYear)}
           ${canEdit ? "" : ` <span class="tag">Chỉ xem</span>`}</div>
-        <div class="actions">${canEdit ? `<button class="btn ghost small" id="addtx">+ Cột TX</button>` : ""}<button class="btn ghost small" id="xls">Xuất Excel</button></div>
+        <div class="actions">${canEdit ? `<button class="btn ghost small" id="addtx">+ Cột TX</button>` : ""}<button class="btn ghost small" id="xls">${canEdit ? "Xuất Excel / Tải file mẫu" : "Xuất Excel"}</button>
+          ${canEdit ? `<button class="btn small" id="imp-grades">Nhập điểm từ Excel</button><input type="file" id="imp-file" accept=".xlsx,.xls,.csv" hidden>` : ""}</div>
       </div>
-      ${canEdit ? `<p class="muted" style="margin:0 0 10px;font-size:13px">Nhập điểm từ 0 đến 10 (VD: 8,5). Nhấn Enter để xuống dòng. Có thể dán cả cột điểm từ Excel vào ô đầu tiên.</p>` : ""}
+      ${canEdit ? `<p class="muted" style="margin:0 0 10px;font-size:13px">Nhập điểm từ 0 đến 10 (VD: 8,5). Nhấn Enter để xuống dòng. Có thể dán cả cột điểm từ Excel vào ô đầu tiên.
+        <br>Nhập bằng Excel: bấm "Xuất Excel / Tải file mẫu", điền điểm vào các cột TX1, TX2…, GK, CK (giữ nguyên cột Mã HS), rồi bấm "Nhập điểm từ Excel". Điểm được điền vào bảng để bạn kiểm tra trước khi bấm "Lưu điểm".</p>
+        <div id="imp-report"></div>` : ""}
       <div class="table-wrap"><table class="gradebook"><thead>
         <tr><th rowspan="2">#</th><th rowspan="2">Họ và tên</th><th class="num grp" colspan="${txCount}">Thường xuyên</th><th class="num grp" rowspan="2">GK</th><th class="num grp" rowspan="2">CK</th><th class="num" rowspan="2">ĐTB HK</th></tr>
         <tr>${Array.from({ length: txCount }, (_, i) => `<th class="num">TX${i + 1}</th>`).join("")}</tr></thead><tbody>
@@ -648,6 +655,15 @@ function renderGradeTable(body, data, ctx, setDirty) {
       refreshDirty();
       toast(`Đã lưu ${ch.length} thay đổi.`);
     }, save);
+    const impBtn = $("#imp-grades", body), impFile = $("#imp-file", body);
+    if (impBtn) {
+      impBtn.onclick = () => impFile.click();
+      impFile.onchange = () => attempt(async () => {
+        const f = impFile.files[0];
+        impFile.value = "";
+        if (f) importGradesFromFile(f);
+      }, impBtn);
+    }
     $("#xls", body).onclick = () => attempt(() => downloadXlsx(
       `So_diem_${data.class.name}_${ctx.subjectName.replace(" (chỉ xem)", "")}_HK${ctx.semester}.xlsx`.replace(/[\\/:*?"<>|\s]+/g, "_"),
       [["STT", "Mã HS", "Họ và tên", ...Array.from({ length: txCount }, (_, i) => `TX${i + 1}`), "GK", "CK", "ĐTB HK"],
@@ -657,6 +673,70 @@ function renderGradeTable(body, data, ctx, setDirty) {
           return [i + 1, s.studentCode, s.fullName, ...tx, r.gk ?? "", r.ck ?? "", semesterAverage(tx, r.gk, r.ck) ?? ""];
         })], "SoDiem"));
   };
+  // Đọc file Excel điểm: khớp học sinh theo Mã HS (hoặc họ tên nếu không có mã), điền vào bảng để kiểm tra rồi lưu.
+  async function importGradesFromFile(file) {
+    const XLSX = await loadXLSX();
+    const wb = XLSX.read(await file.arrayBuffer());
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: "" });
+    let hIdx = -1, cols = null;
+    for (let i = 0; i < Math.min(20, aoa.length); i++) {
+      const m = { tx: {} };
+      aoa[i].forEach((h, c) => {
+        const n = normHeader(h);
+        let mt;
+        if (HEADER_ALIASES.studentCode.includes(n)) m.code ??= c;
+        else if (HEADER_ALIASES.fullName.includes(n)) m.name ??= c;
+        else if ((mt = n.match(/^(?:tx|ddgtx|thuongxuyen)(\d{1,2})$/))) m.tx[+mt[1]] ??= c;
+        else if (["gk", "giuaky", "giuaki", "ddggk", "diemgiuaky"].includes(n)) m.gk ??= c;
+        else if (["ck", "cuoiky", "cuoiki", "ddgck", "diemcuoiky"].includes(n)) m.ck ??= c;
+      });
+      if ((m.code !== undefined || m.name !== undefined) && (Object.keys(m.tx).length || m.gk !== undefined || m.ck !== undefined)) { hIdx = i; cols = m; break; }
+    }
+    if (hIdx < 0) throw new Error('Không tìm thấy dòng tiêu đề. File cần có cột "Mã HS" hoặc "Họ và tên" và các cột điểm TX1, TX2…, GK, CK.');
+    const slots = Object.keys(cols.tx).map(Number).filter((n) => n >= 1 && n <= 10);
+    const byCode = new Map(students.map((s) => [normHeader(s.studentCode), s]));
+    const nameCount = new Map();
+    students.forEach((s) => nameCount.set(normHeader(s.fullName), (nameCount.get(normHeader(s.fullName)) || 0) + 1));
+    const byName = new Map(students.map((s) => [normHeader(s.fullName), s]));
+    const problems = [];
+    let filled = 0, matched = 0;
+    const seen = new Set();
+    for (let i = hIdx + 1; i < aoa.length; i++) {
+      const r = aoa[i], line = i + 1;
+      const code = cols.code !== undefined ? normHeader(r[cols.code]) : "";
+      const name = cols.name !== undefined ? normHeader(r[cols.name]) : "";
+      if (!code && !name) continue;
+      let st = code ? byCode.get(code) : null;
+      if (!st && name) {
+        if (nameCount.get(name) > 1) { problems.push(`Dòng ${line}: có nhiều học sinh trùng tên "${cellText(r[cols.name])}" – cần cột Mã HS.`); continue; }
+        st = byName.get(name);
+      }
+      if (!st) { problems.push(`Dòng ${line}: không tìm thấy học sinh "${cellText(r[cols.name] ?? r[cols.code])}" trong lớp.`); continue; }
+      if (seen.has(st.id)) { problems.push(`Dòng ${line}: học sinh ${st.fullName} xuất hiện nhiều lần, chỉ lấy dòng đầu.`); continue; }
+      seen.add(st.id); matched++;
+      const rec = byStudent.get(st.id);
+      const take = (col, label, apply) => {
+        if (col === undefined) return;
+        const raw = cellText(r[col]);
+        if (raw === "") return; // ô trống: giữ nguyên điểm đang có
+        const v = parseScore(typeof r[col] === "number" ? String(Math.round(r[col] * 100) / 100) : raw);
+        if (Number.isNaN(v)) { problems.push(`Dòng ${line} (${st.fullName}), cột ${label}: "${raw}" không phải điểm hợp lệ (0–10).`); return; }
+        apply(v); filled++;
+      };
+      for (const sl of slots) take(cols.tx[sl], `TX${sl}`, (v) => (rec.tx[sl] = v));
+      take(cols.gk, "GK", (v) => (rec.gk = v));
+      take(cols.ck, "CK", (v) => (rec.ck = v));
+    }
+    if (slots.length) txCount = Math.max(txCount, ...slots);
+    draw();
+    refreshDirty();
+    const rep = $("#imp-report", body);
+    const notInFile = students.length - matched;
+    rep.innerHTML = `<div class="notice ${filled ? "ok" : "warn"}">Đã đọc file "<b>${esc(file.name)}</b>": điền <b>${filled}</b> ô điểm cho <b>${matched}</b> học sinh.
+      ${notInFile > 0 ? `${notInFile} học sinh không có trong file (giữ nguyên điểm).` : ""} Các ô màu vàng là điểm mới – hãy kiểm tra rồi bấm <b>Lưu điểm</b>.
+      ${problems.length ? `<ul>${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}</div>`;
+    toast(filled ? `Đã điền ${filled} ô điểm từ Excel. Nhớ bấm "Lưu điểm".` : "Không có điểm nào được điền.", !filled);
+  }
   draw();
   refreshDirty();
 }
