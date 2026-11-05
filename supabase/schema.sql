@@ -141,6 +141,6 @@ create policy "admin insert audit" on public.grade_audit_log for insert to authe
 -- Chua tao Auth user hay cap tai khoan. Luong dang nhap bang SDT va mat khau
 -- chung cho SDT bo/me se duoc xay bang Edge Function an toan o giai doan tiep.
 
--- QUAN TRỌNG: sau khi tạo tài khoản quản trị đầu tiên trong Supabase Auth,
+\n-- QUAN TRỌNG: sau khi tạo tài khoản quản trị đầu tiên trong Supabase Auth,
 -- quản trị viên kỹ thuật phải tạo bản ghi profiles tương ứng với role='admin'
 -- bằng môi trường quản trị an toàn. Không cấp role admin từ trình duyệt.

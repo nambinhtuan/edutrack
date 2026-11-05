@@ -1,31 +1,24 @@
-# EduTrack – Bộ khởi đầu
+# EduTrack – Bộ khởi đầu có kiểm tra kết nối Supabase
 
-## GitHub
-1. Tạo repository tên `edutrack`.
-2. Giải nén ZIP.
-3. Trong repository chọn Add file → Upload files.
-4. Kéo thả toàn bộ NỘI DUNG thư mục `EduTrack_bo_khoi_dau` (không tải riêng ZIP).
-5. Chọn Commit changes.
-Ở trang chính phải thấy `index.html`, `netlify.toml`, `assets`, `supabase`.
+## 1. Điền cấu hình Supabase
+1. Mở `assets/supabase-config.js` bằng Notepad hoặc VS Code.
+2. Thay `DAN_PROJECT_URL_VAO_DAY` bằng Project URL lấy trong Supabase.
+3. Thay `DAN_PUBLISHABLE_KEY_VAO_DAY` bằng Publishable key (hoặc anon key cũ).
+4. Giữ nguyên dấu ngoặc kép và không xóa dấu chấm phẩy cuối dòng.
+5. Không dùng `service_role` hoặc `secret key`.
 
-## Supabase
-1. Tạo project mới tại https://supabase.com.
-2. Mở SQL Editor → New query.
-3. Mở `supabase/schema.sql`, sao chép toàn bộ, dán vào SQL Editor rồi bấm Run.
-4. Chỉ chạy trên project mới, trống. Nếu đã có dữ liệu/bảng thì dừng lại và hỏi trước.
+## 2. Cập nhật GitHub
+1. Mở repository `edutrack` trên GitHub.
+2. Chọn Add file → Upload files.
+3. Giải nén ZIP và tải lên toàn bộ nội dung bên trong thư mục `EduTrack_bo_khoi_dau` (không tải file ZIP).
+4. Nếu GitHub hỏi ghi đè các file đã có, chấp nhận cập nhật.
+5. Nhấn Commit changes.
 
-## Netlify
-1. Đăng nhập https://www.netlify.com.
-2. Add new site → Import an existing project → GitHub.
-3. Chọn repository `edutrack`.
-4. Build command để trống; Publish directory nhập dấu chấm `.`.
-5. Deploy site.
+## 3. Kiểm tra Netlify
+Netlify thường tự triển khai lại sau khi GitHub có commit mới. Mở website, tải lại trang (Ctrl+F5). Trong mục “Trạng thái hệ thống” cần thấy: “Đã kết nối được tới Supabase”.
 
-## Bảo mật
-Không đưa dữ liệu học sinh thật vào giai đoạn này. Không đăng `service_role` key lên GitHub hoặc website. Chưa cần điền khóa Supabase vào file nào; sẽ cấu hình an toàn ở bước kế tiếp.
-
-## Phạm vi hiện tại
-Đây mới là bộ nền tảng: trang chủ mẫu và cấu trúc bảng dữ liệu có phân quyền RLS. Chưa có đăng nhập thật, nhập Excel, quản trị, sổ điểm, cấp tài khoản phụ huynh, đổi mật khẩu, nhật ký điểm tự động hoặc sao lưu. Chưa dùng cho vận hành thật.
-
-## Lộ trình
-Kết nối Supabase → đăng nhập/phân quyền → nhập Excel 12 cột → quản lý lớp/giáo viên/môn → sổ điểm theo quy chế hiện hành → kiểm thử dữ liệu giả lập.
+## Bảo mật và phạm vi
+- Project URL và Publishable/anon key là thông tin dùng ở trình duyệt; chúng không thay thế bảo mật RLS.
+- Tuyệt đối không đưa `service_role` hoặc `secret key` vào website/GitHub.
+- Chưa tải dữ liệu học sinh thật lên hệ thống.
+- Bản này chỉ kiểm tra kết nối tới Supabase Auth; chưa có đăng nhập, quản trị, nhập Excel, sổ điểm hoặc phân quyền giao diện. Cần xây dựng và kiểm thử các chức năng đó trước khi vận hành thật.
