@@ -331,17 +331,27 @@ async function viewStudents(page) {
       <button class="btn ghost" id="exp">Xuất Excel</button>
     </div><div id="tbl"></div></div>`;
 
+  const selected = new Set();
   const drawTable = () => {
     const q = normHeader($("#q").value);
     const rows = list.filter((s) => !q || normHeader(`${s.fullName} ${s.studentCode} ${s.fatherPhone} ${s.motherPhone}`).includes(q));
-    $("#tbl").innerHTML = rows.length ? `<p class="muted" style="margin:0 0 8px">${rows.length} học sinh</p><div class="table-wrap"><table>
-      <thead><tr><th>#</th><th>Mã HS</th><th>Họ và tên</th><th>Ngày sinh</th><th>GT</th><th>Lớp</th><th>Bố</th><th>Mẹ</th><th></th></tr></thead><tbody>
-      ${rows.map((s, i) => `<tr><td class="muted">${i + 1}</td><td class="nowrap">${esc(s.studentCode)}</td><td><b>${esc(s.fullName)}</b></td>
+    const allOn = rows.length > 0 && rows.every((s) => selected.has(s.id));
+    $("#tbl").innerHTML = rows.length ? `<div class="row" style="margin:0 0 8px;justify-content:space-between;align-items:center">
+      <span class="muted">${rows.length} học sinh · <b>${selected.size}</b> đã chọn</span>
+      <div class="actions"><button class="btn ghost small" id="sel-clear" ${selected.size ? "" : "disabled"}>Bỏ chọn</button>
+      <button class="btn small" id="sel-reset" ${selected.size ? "" : "disabled"}>Cấp lại mật khẩu phụ huynh của ${selected.size} học sinh đã chọn</button></div></div><div class="table-wrap"><table>
+      <thead><tr><th><input type="checkbox" id="sel-all" ${allOn ? "checked" : ""} title="Chọn tất cả"></th><th>#</th><th>Mã HS</th><th>Họ và tên</th><th>Ngày sinh</th><th>GT</th><th>Lớp</th><th>Bố</th><th>Mẹ</th><th></th></tr></thead><tbody>
+      ${rows.map((s, i) => `<tr><td><input type="checkbox" data-sel="${s.id}" ${selected.has(s.id) ? "checked" : ""}></td><td class="muted">${i + 1}</td><td class="nowrap">${esc(s.studentCode)}</td><td><b>${esc(s.fullName)}</b></td>
         <td class="nowrap">${esc(s.dateOfBirth)}</td><td>${esc(s.gender)}</td><td class="nowrap">${s.className ? esc(s.className) : `<span class="tag">Chưa xếp</span>`}</td>
         <td>${esc(s.fatherName)}${s.fatherPhone ? `<br><small class="muted">${esc(s.fatherPhone)}</small>` : ""}</td>
         <td>${esc(s.motherName)}${s.motherPhone ? `<br><small class="muted">${esc(s.motherPhone)}</small>` : ""}</td>
         <td><div class="actions"><button class="btn ghost small" data-edit="${s.id}">Sửa</button><button class="btn danger small" data-del="${s.id}">Xoá</button></div></td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">Chưa có học sinh nào${q ? " khớp tìm kiếm" : ""}.</div>`;
+    if (!rows.length) return;
+    $("#sel-all").onchange = (e) => { rows.forEach((s) => (e.target.checked ? selected.add(s.id) : selected.delete(s.id))); drawTable(); };
+    $$("[data-sel]").forEach((cb) => (cb.onchange = () => { cb.checked ? selected.add(+cb.dataset.sel) : selected.delete(+cb.dataset.sel); drawTable(); }));
+    $("#sel-clear").onclick = () => { selected.clear(); drawTable(); };
+    $("#sel-reset").onclick = () => bulkResetParents({ studentIds: [...selected] }, selected.size, `phụ huynh của ${selected.size} học sinh đã chọn`, () => { selected.clear(); drawTable(); });
   };
   drawTable();
   $("#q").oninput = drawTable;
@@ -730,21 +740,50 @@ async function viewTeachers(page) {
 }
 
 // ---------- Tài khoản phụ huynh ----------
+// Cấp lại mật khẩu cho nhiều phụ huynh, hiện kết quả và tải danh sách Excel.
+async function bulkResetParents(payload, count, what, done) {
+  if (!(await confirmBox(`Cấp mật khẩu mới cho ${what}? Mật khẩu cũ sẽ không dùng được nữa. Mật khẩu mới theo dạng tên con + ngày sinh (VD: bang2103).`, "Cấp lại")))
+    return;
+  await attempt(async () => {
+    const r = await api("POST", "/api/parents/reset-passwords", payload);
+    const rows = r.updated.map((a) => [a.phone, a.fullName, a.password, a.students.join("; ")]);
+    const header = ["Tên đăng nhập (SĐT)", "Phụ huynh", "Mật khẩu", "Con"];
+    const file = `EduTrack_cap_lai_mat_khau_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    done();
+    openModal(`<h2>Đã cấp lại ${rows.length} mật khẩu</h2>
+      <div class="notice warn">Mật khẩu chỉ hiển thị lần này. Hãy tải danh sách về và gửi cho từng phụ huynh.</div>
+      <div class="table-wrap" style="max-height:340px"><table><thead><tr>${header.map((h) => `<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map((x) => `<tr><td>${esc(x[0])}</td><td>${esc(x[1])}</td><td><code>${esc(x[2])}</code></td><td>${esc(x[3])}</td></tr>`).join("")}</tbody></table></div>
+      <div class="actions"><button type="button" class="btn ghost" id="bulk-dl">Tải danh sách (Excel)</button><button class="btn" value="ok">Đóng</button></div>`);
+    $("#bulk-dl").onclick = () => attempt(() => downloadXlsx(file, [header, ...rows], "TaiKhoan"));
+  });
+}
+
 async function viewParents(page) {
   const list = await api("GET", "/api/parents");
+  const selected = new Set();
   page.innerHTML = head("Tài khoản phụ huynh", "Tài khoản được tạo tự động từ SĐT bố/mẹ trong hồ sơ học sinh. Mật khẩu mặc định: tên con (không dấu) + ngày, tháng sinh – VD: Hà Văn Bằng, 21/03/2015 → bang2103.",
     `<button class="btn ghost" id="easy">Đặt mật khẩu dễ nhớ cho phụ huynh chưa đổi mật khẩu</button>`) +
     `<div class="card"><div class="row" style="margin-bottom:12px"><label class="field grow"><span>Tìm kiếm</span><input type="search" id="q" placeholder="SĐT, tên phụ huynh hoặc tên con…"></label></div><div id="tbl"></div></div>`;
   const draw = () => {
     const q = normHeader($("#q").value);
     const rows = list.filter((p) => !q || normHeader(`${p.username} ${p.fullName} ${p.children}`).includes(q));
-    $("#tbl").innerHTML = rows.length ? `<p class="muted" style="margin:0 0 8px">${rows.length} tài khoản</p><div class="table-wrap"><table>
-      <thead><tr><th>Tên đăng nhập (SĐT)</th><th>Phụ huynh</th><th>Con</th><th>Trạng thái</th><th></th></tr></thead><tbody>
-      ${rows.map((p) => `<tr><td class="nowrap"><b>${esc(p.username)}</b></td><td>${esc(p.fullName)}</td><td>${esc(p.children) || `<span class="muted">—</span>`}</td>
+    const allOn = rows.length > 0 && rows.every((p) => selected.has(p.id));
+    $("#tbl").innerHTML = rows.length ? `<div class="row" style="margin:0 0 8px;justify-content:space-between;align-items:center">
+      <span class="muted">${rows.length} tài khoản · <b id="sel-count">${selected.size}</b> đã chọn</span>
+      <div class="actions"><button class="btn ghost small" id="sel-clear" ${selected.size ? "" : "disabled"}>Bỏ chọn</button>
+      <button class="btn small" id="sel-reset" ${selected.size ? "" : "disabled"}>Cấp lại mật khẩu cho ${selected.size} tài khoản đã chọn</button></div></div><div class="table-wrap"><table>
+      <thead><tr><th><input type="checkbox" id="sel-all" ${allOn ? "checked" : ""} title="Chọn tất cả"></th><th>Tên đăng nhập (SĐT)</th><th>Phụ huynh</th><th>Con</th><th>Trạng thái</th><th></th></tr></thead><tbody>
+      ${rows.map((p) => `<tr><td><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? "checked" : ""}></td><td class="nowrap"><b>${esc(p.username)}</b></td><td>${esc(p.fullName)}</td><td>${esc(p.children) || `<span class="muted">—</span>`}</td>
         <td>${!p.isActive ? `<span class="tag off">Đã khoá</span>` : p.mustChangePassword ? `<span class="tag">Chưa đổi mật khẩu</span>` : `<span class="tag ok">Đã đổi mật khẩu</span>`}</td>
         <td><div class="actions"><button class="btn ghost small" data-reset="${p.id}">Cấp lại mật khẩu</button>
         <button class="btn ghost small" data-toggle="${p.id}">${p.isActive ? "Khoá" : "Mở khoá"}</button><button class="btn danger small" data-del="${p.id}">Xoá</button></div></td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">Chưa có tài khoản phụ huynh. Tài khoản sẽ được tạo khi bạn nhập hồ sơ học sinh có SĐT bố/mẹ.</div>`;
+    if (!rows.length) return;
+    $("#sel-all").onchange = (e) => { rows.forEach((p) => (e.target.checked ? selected.add(p.id) : selected.delete(p.id))); draw(); };
+    $$("[data-sel]").forEach((cb) => (cb.onchange = () => { cb.checked ? selected.add(+cb.dataset.sel) : selected.delete(+cb.dataset.sel); draw(); }));
+    $("#sel-clear").onclick = () => { selected.clear(); draw(); };
+    $("#sel-reset").onclick = () => bulkResetParents({ parentIds: [...selected] }, selected.size, `${selected.size} tài khoản phụ huynh đã chọn`, () => viewParents(page));
   };
   draw();
   $("#q").oninput = draw;

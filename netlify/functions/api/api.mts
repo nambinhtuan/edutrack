@@ -530,6 +530,34 @@ route("POST", "/api/parents/easy-passwords", async (c) => {
   return json({ updated: out, skipped });
 });
 
+// Cấp lại mật khẩu hàng loạt: theo danh sách tài khoản phụ huynh và/hoặc danh sách học sinh (lấy phụ huynh của các em).
+route("POST", "/api/parents/reset-passwords", async (c) => {
+  requireAdmin(c);
+  const toIds = (v: unknown) => (Array.isArray(v) ? v.map(intParam) : []);
+  const parentIds = new Set(toIds(c.body.parentIds));
+  const studentIds = toIds(c.body.studentIds);
+  if (parentIds.size + studentIds.length > 5000) fail(400, "Chọn quá nhiều mục.");
+  for (const part of chunk(studentIds, 500)) {
+    for (const l of await db.select({ p: parentStudents.parentId }).from(parentStudents).where(inArray(parentStudents.studentId, part)))
+      parentIds.add(l.p);
+  }
+  if (!parentIds.size) fail(400, "Không có tài khoản phụ huynh nào ứng với lựa chọn (học sinh chưa có SĐT bố/mẹ?).");
+  const list: { id: number; username: string; fullName: string }[] = [];
+  for (const part of chunk([...parentIds], 500)) list.push(...await db.select({ id: users.id, username: users.username, fullName: users.fullName })
+    .from(users).where(and(inArray(users.id, part), eq(users.role, "parent"))));
+  const out: { phone: string; fullName: string; password: string; students: string[] }[] = [];
+  for (const p of list.sort((x, y) => x.username.localeCompare(y.username))) {
+    const password = (await parentEasyPassword(p.id)) ?? randomPassword();
+    await db.update(users).set({ passwordHash: await hashPassword(password), mustChangePassword: true, failedAttempts: 0, lockedUntil: null })
+      .where(eq(users.id, p.id));
+    await db.delete(sessions).where(eq(sessions.userId, p.id));
+    const kids = await db.select({ n: students.fullName }).from(parentStudents).innerJoin(students, eq(students.id, parentStudents.studentId))
+      .where(eq(parentStudents.parentId, p.id));
+    out.push({ phone: p.username, fullName: p.fullName, password, students: kids.map((k) => k.n) });
+  }
+  return json({ updated: out });
+});
+
 route("PUT", "/api/parents/:id", async (c) => {
   requireAdmin(c);
   const id = intParam(c.params.id);
