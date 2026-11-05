@@ -6,7 +6,7 @@ import {
 } from "../../../db/schema.js";
 import {
   clearCookie, createSession, destroySession, getSessionUser, hashPassword, normalizePhone,
-  randomPassword, verifyPassword, type SessionUser,
+  randomPassword, verifyPassword, easyParentPassword, type SessionUser,
 } from "./auth.js";
 
 class HttpError extends Error {
@@ -241,10 +241,19 @@ route("DELETE", "/api/users/:id", async (c) => {
   return json({ ok: true });
 });
 
+async function parentEasyPassword(parentId: number): Promise<string | null> {
+  const kids = await db.select({ fullName: students.fullName, dob: students.dateOfBirth }).from(parentStudents)
+    .innerJoin(students, eq(students.id, parentStudents.studentId))
+    .where(eq(parentStudents.parentId, parentId)).orderBy(asc(students.id));
+  for (const k of kids) { const pw = easyParentPassword(k.fullName, k.dob); if (pw) return pw; }
+  return null;
+}
+
 route("POST", "/api/users/:id/reset-password", async (c) => {
   requireAdmin(c);
   const id = intParam(c.params.id);
-  const password = randomPassword();
+  const [target] = await db.select({ role: users.role }).from(users).where(eq(users.id, id));
+  const password = (target?.role === "parent" ? await parentEasyPassword(id) : null) ?? randomPassword();
   const [row] = await db.update(users).set({
     passwordHash: await hashPassword(password), mustChangePassword: true, failedAttempts: 0, lockedUntil: null,
   }).where(and(eq(users.id, id), ne(users.role, "admin"))).returning({ username: users.username });
@@ -342,10 +351,11 @@ function studentInput(b: any): { data: StudentInput; errors: string[] } {
   };
 }
 
-type NewAccount = { phone: string; fullName: string; password: string; students: string[] };
+type NewAccount = { phone: string; fullName: string; password: string; students: string[]; easy: string | null };
+type ParentSyncItem = { studentId: number; studentName: string; childName: string; childDob: string | null; phones: { phone: string; name: string | null }[] };
 
 // Tạo (nếu chưa có) tài khoản phụ huynh theo SĐT và liên kết với học sinh.
-async function syncParents(list: { studentId: number; studentName: string; phones: { phone: string; name: string | null }[] }[]) {
+async function syncParents(list: ParentSyncItem[]) {
   const warnings: string[] = [];
   const allPhones = [...new Set(list.flatMap((s) => s.phones.map((p) => p.phone)))];
   const existing = new Map<string, { id: number; role: string }>();
@@ -356,14 +366,15 @@ async function syncParents(list: { studentId: number; studentName: string; phone
   const toCreate = new Map<string, NewAccount>();
   for (const s of list) for (const p of s.phones) {
     if (existing.has(p.phone)) continue;
-    const acc = toCreate.get(p.phone) ?? { phone: p.phone, fullName: p.name || "Phụ huynh", password: "", students: [] };
+    // Mật khẩu theo con đầu tiên trong danh sách: tên + ngày sinh (ddmm).
+    const acc = toCreate.get(p.phone) ?? { phone: p.phone, fullName: p.name || "Phụ huynh", password: "", students: [], easy: easyParentPassword(s.childName, s.childDob) };
     acc.students.push(s.studentName);
     toCreate.set(p.phone, acc);
   }
   const created = [...toCreate.values()];
   for (const part of chunk(created, 100)) {
     const values = await Promise.all(part.map(async (a) => {
-      a.password = randomPassword();
+      a.password = a.easy ?? randomPassword();
       return { username: a.phone, fullName: a.fullName, role: "parent", passwordHash: await hashPassword(a.password) };
     }));
     const rows = await db.insert(users).values(values).onConflictDoNothing().returning({ id: users.id, username: users.username, role: users.role });
@@ -377,7 +388,10 @@ async function syncParents(list: { studentId: number; studentName: string; phone
     links.push({ parentId: u.id, studentId: s.studentId });
   }
   for (const part of chunk(links, 500)) await db.insert(parentStudents).values(part).onConflictDoNothing();
-  return { created: created.filter((a) => existing.has(a.phone)), warnings };
+  const done = created.filter((a) => existing.has(a.phone));
+  const randomOnes = done.filter((a) => !a.easy).length;
+  if (randomOnes) warnings.push(`${randomOnes} tài khoản phụ huynh dùng mật khẩu ngẫu nhiên vì học sinh thiếu ngày sinh hoặc ngày sinh không đúng dạng dd/mm/yyyy.`);
+  return { created: done.map(({ easy, ...a }) => a), warnings };
 }
 
 route("POST", "/api/students", async (c) => {
@@ -391,7 +405,7 @@ route("POST", "/api/students", async (c) => {
     data.fatherPhone && { phone: data.fatherPhone, name: data.fatherName },
     data.motherPhone && { phone: data.motherPhone, name: data.motherName },
   ].filter(Boolean) as { phone: string; name: string | null }[];
-  const result = await syncParents([{ studentId: row.id, studentName: data.fullName, phones }]);
+  const result = await syncParents([{ studentId: row.id, studentName: data.fullName, childName: data.fullName, childDob: data.dateOfBirth, phones }]);
   return json({ id: row.id, ...result }, { status: 201 });
 });
 
@@ -414,7 +428,7 @@ route("PUT", "/api/students/:id", async (c) => {
     .from(parentStudents).innerJoin(users, eq(users.id, parentStudents.parentId)).where(eq(parentStudents.studentId, id));
   const stale = links.filter((l) => !keep.includes(l.username)).map((l) => l.parentId);
   if (stale.length) await db.delete(parentStudents).where(and(eq(parentStudents.studentId, id), inArray(parentStudents.parentId, stale)));
-  const result = await syncParents([{ studentId: id, studentName: data.fullName, phones }]);
+  const result = await syncParents([{ studentId: id, studentName: data.fullName, childName: data.fullName, childDob: data.dateOfBirth, phones }]);
   return json({ ok: true, ...result });
 });
 
@@ -471,6 +485,7 @@ route("POST", "/api/students/import", async (c) => {
 
   const parentList = valid.map((v) => ({
     studentId: idByCode.get(v.studentCode)!, studentName: `${v.fullName} (${v.className})`,
+    childName: v.fullName, childDob: v.dateOfBirth,
     phones: [
       v.fatherPhone && { phone: v.fatherPhone, name: v.fatherName },
       v.motherPhone && { phone: v.motherPhone, name: v.motherName },
@@ -495,6 +510,24 @@ route("GET", "/api/parents", async (c) => {
     .leftJoin(classes, eq(classes.id, students.classId))
     .where(eq(users.role, "parent")).groupBy(users.id).orderBy(asc(users.username));
   return json(rows);
+});
+
+// Đổi mật khẩu của các phụ huynh CHƯA tự đổi mật khẩu sang dạng tên con + ngày sinh.
+route("POST", "/api/parents/easy-passwords", async (c) => {
+  requireAdmin(c);
+  const list = await db.select({ id: users.id, username: users.username, fullName: users.fullName }).from(users)
+    .where(and(eq(users.role, "parent"), eq(users.mustChangePassword, true)));
+  const out: { phone: string; fullName: string; password: string; students: string[] }[] = [];
+  let skipped = 0;
+  for (const p of list) {
+    const pw = await parentEasyPassword(p.id);
+    if (!pw) { skipped++; continue; }
+    await db.update(users).set({ passwordHash: await hashPassword(pw), failedAttempts: 0, lockedUntil: null }).where(eq(users.id, p.id));
+    const kids = await db.select({ n: students.fullName }).from(parentStudents).innerJoin(students, eq(students.id, parentStudents.studentId))
+      .where(eq(parentStudents.parentId, p.id));
+    out.push({ phone: p.username, fullName: p.fullName, password: pw, students: kids.map((k) => k.n) });
+  }
+  return json({ updated: out, skipped });
 });
 
 route("PUT", "/api/parents/:id", async (c) => {
@@ -629,8 +662,9 @@ export default async (req: Request) => {
   const match = routes.find((r) => r.method === req.method && r.pattern.test(path));
   if (!match) return json({ error: "Không tìm thấy." }, { status: 404 });
   try {
-    if (req.method !== "GET" && !(req.headers.get("content-type") || "").includes("application/json"))
-      fail(415, "Yêu cầu không hợp lệ.");
+    const ct = req.headers.get("content-type") || "";
+    // Chặn gửi form chéo trang: yêu cầu ghi chỉ chấp nhận JSON (hoặc không có nội dung, như khi xoá).
+    if (req.method !== "GET" && ct && !ct.includes("application/json")) fail(415, "Yêu cầu không hợp lệ.");
     const m = path.match(match.pattern)!;
     const params: Record<string, string> = {};
     match.keys.forEach((k, i) => (params[k] = m[i + 1]));

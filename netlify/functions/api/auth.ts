@@ -86,3 +86,19 @@ export function normalizePhone(raw: unknown): string | null {
   if (!/^0\d{9}$/.test(s)) return null;
   return s;
 }
+
+// Mật khẩu dễ nhớ cho phụ huynh: tên con (không dấu, viết thường) + ngày sinh dạng ddmm.
+// VD: "Hà Văn Bằng", "21/03/2015" → "bang2103". Trả về null nếu thiếu tên hoặc ngày sinh.
+export function easyParentPassword(fullName: string | null | undefined, dob: string | null | undefined): string | null {
+  const given = String(fullName ?? "").trim().split(/\s+/).pop() || "";
+  const name = given.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").toLowerCase().replace(/[^a-z]/g, "");
+  const s = String(dob ?? "").trim();
+  let d: number | undefined, m: number | undefined;
+  let mt: RegExpMatchArray | null;
+  if ((mt = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) { m = +mt[2]; d = +mt[3]; }
+  else if ((mt = s.match(/^(\d{1,2})[-/.\s](\d{1,2})(?:[-/.\s]\d{2,4})?$/))) { d = +mt[1]; m = +mt[2]; }
+  else if ((mt = s.match(/^(\d{2})(\d{2})\d{4}$/))) { d = +mt[1]; m = +mt[2]; }
+  if (!name || !d || !m || d > 31 || m > 12) return null;
+  const pw = `${name}${String(d).padStart(2, "0")}${String(m).padStart(2, "0")}`;
+  return pw.length >= 6 ? pw : null;
+}

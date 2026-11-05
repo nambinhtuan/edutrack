@@ -10,8 +10,8 @@ let me = null;
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    headers: method !== "GET" ? { "Content-Type": "application/json" } : {},
+    body: method !== "GET" ? JSON.stringify(body ?? {}) : undefined,
     credentials: "same-origin",
   });
   const data = await res.json().catch(() => ({}));
@@ -732,7 +732,8 @@ async function viewTeachers(page) {
 // ---------- Tài khoản phụ huynh ----------
 async function viewParents(page) {
   const list = await api("GET", "/api/parents");
-  page.innerHTML = head("Tài khoản phụ huynh", "Tài khoản được tạo tự động từ SĐT bố/mẹ trong hồ sơ học sinh.") +
+  page.innerHTML = head("Tài khoản phụ huynh", "Tài khoản được tạo tự động từ SĐT bố/mẹ trong hồ sơ học sinh. Mật khẩu mặc định: tên con (không dấu) + ngày, tháng sinh – VD: Hà Văn Bằng, 21/03/2015 → bang2103.",
+    `<button class="btn ghost" id="easy">Đặt mật khẩu dễ nhớ cho phụ huynh chưa đổi mật khẩu</button>`) +
     `<div class="card"><div class="row" style="margin-bottom:12px"><label class="field grow"><span>Tìm kiếm</span><input type="search" id="q" placeholder="SĐT, tên phụ huynh hoặc tên con…"></label></div><div id="tbl"></div></div>`;
   const draw = () => {
     const q = normHeader($("#q").value);
@@ -747,6 +748,18 @@ async function viewParents(page) {
   };
   draw();
   $("#q").oninput = draw;
+  $("#easy").onclick = async () => {
+    if (!(await confirmBox("Đặt lại mật khẩu của tất cả phụ huynh CHƯA tự đổi mật khẩu theo dạng tên con + ngày sinh (VD: bang2103)? Phụ huynh đã tự đổi mật khẩu sẽ không bị ảnh hưởng.", "Đồng ý")))
+      return;
+    attempt(async () => {
+      const r = await api("POST", "/api/parents/easy-passwords", {});
+      const rows = r.updated.map((a) => [a.phone, a.fullName, a.password, a.students.join("; ")]);
+      if (rows.length) await downloadXlsx(`EduTrack_mat_khau_phu_huynh_${new Date().toISOString().slice(0, 10)}.xlsx`,
+        [["Tên đăng nhập (SĐT)", "Phụ huynh", "Mật khẩu", "Con"], ...rows], "TaiKhoan");
+      toast(`Đã đặt lại ${rows.length} tài khoản${r.skipped ? `, bỏ qua ${r.skipped} tài khoản do con thiếu ngày sinh` : ""}. Danh sách đã được tải về.`);
+      viewParents(page);
+    });
+  };
   page.onclick = async (e) => {
     const get = (a) => { const el = e.target.closest(`[${a}]`); return el ? list.find((p) => p.id === +el.getAttribute(a)) : null; };
     let p;
