@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "drizzle-kit migrate"
+    "build": "node migrate.js"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",

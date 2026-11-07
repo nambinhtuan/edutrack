@@ -25,14 +25,12 @@ function route(method: string, path: string, handler: Handler) {
 
 const requireUser = (c: Ctx) => c.user ?? fail(401, "Bạn cần đăng nhập.");
 
-// Quản trị viên: Quản trị hệ thống (admin) hoặc giáo viên được phân quyền quản trị (canManage)
 const requireAdmin = (c: Ctx) => {
   const u = requireUser(c);
   if (u.role !== "admin" && !u.canManage) fail(403, "Bạn không có quyền quản trị này.");
   return u;
 };
 
-// Quản trị hệ thống cao nhất: chỉ tài khoản admin gốc
 const requireSuperAdmin = (c: Ctx) => {
   const u = requireUser(c);
   if (u.role !== "admin" && !u.isSuperAdmin) fail(403, "Chỉ Quản trị hệ thống mới có quyền này.");
@@ -57,7 +55,6 @@ const checkNewPassword = (pw: unknown) => {
   return pw as string;
 };
 
-// Chuẩn hoá điểm nhận xét (Đạt / Chưa đạt)
 function parseCommentGrade(raw: unknown): { score: string; scoreText: string } | null {
   if (raw === null || raw === undefined || raw === "") return null;
   const s = String(raw).trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d");
@@ -70,14 +67,115 @@ function parseCommentGrade(raw: unknown): { score: string; scoreText: string } |
   fail(400, `Giá trị "${raw}" không hợp lệ cho môn nhận xét (chỉ nhận Đ/1/Đạt hoặc CĐ/0/Chưa đạt).`);
 }
 
+// Các câu lệnh DDL riêng rẽ để tạo bảng an toàn trên Neon
+const DDL_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS "users" (
+    "id" serial PRIMARY KEY,
+    "username" text NOT NULL UNIQUE,
+    "password_hash" text NOT NULL,
+    "full_name" text DEFAULT '' NOT NULL,
+    "role" text NOT NULL,
+    "can_manage" boolean DEFAULT false NOT NULL,
+    "is_super_admin" boolean DEFAULT false NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "must_change_password" boolean DEFAULT true NOT NULL,
+    "failed_attempts" integer DEFAULT 0 NOT NULL,
+    "locked_until" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "sessions" (
+    "token_hash" text PRIMARY KEY,
+    "user_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "expires_at" timestamp with time zone NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "classes" (
+    "id" serial PRIMARY KEY,
+    "name" text NOT NULL,
+    "school_year" text NOT NULL,
+    "homeroom_teacher_id" integer REFERENCES "users"("id") ON DELETE SET NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "classes_name_year_uq" ON "classes" ("name","school_year")`,
+  `CREATE TABLE IF NOT EXISTS "subjects" (
+    "id" serial PRIMARY KEY,
+    "name" text NOT NULL UNIQUE,
+    "sort_order" integer DEFAULT 0 NOT NULL,
+    "evaluation_type" text DEFAULT 'score' NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "students" (
+    "id" serial PRIMARY KEY,
+    "student_code" text NOT NULL UNIQUE,
+    "class_id" integer REFERENCES "classes"("id") ON DELETE SET NULL,
+    "full_name" text NOT NULL,
+    "date_of_birth" text,
+    "gender" text,
+    "address" text,
+    "father_name" text,
+    "father_phone" text,
+    "mother_name" text,
+    "mother_phone" text,
+    "note" text,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS "students_class_idx" ON "students" ("class_id")`,
+  `CREATE TABLE IF NOT EXISTS "parent_students" (
+    "parent_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "student_id" integer NOT NULL REFERENCES "students"("id") ON DELETE CASCADE,
+    PRIMARY KEY ("parent_id", "student_id")
+  )`,
+  `CREATE TABLE IF NOT EXISTS "teacher_assignments" (
+    "id" serial PRIMARY KEY,
+    "teacher_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "class_id" integer NOT NULL REFERENCES "classes"("id") ON DELETE CASCADE,
+    "subject_id" integer NOT NULL REFERENCES "subjects"("id") ON DELETE CASCADE
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "assign_uq" ON "teacher_assignments" ("teacher_id","class_id","subject_id")`,
+  `CREATE TABLE IF NOT EXISTS "grades" (
+    "id" serial PRIMARY KEY,
+    "student_id" integer NOT NULL REFERENCES "students"("id") ON DELETE CASCADE,
+    "subject_id" integer NOT NULL REFERENCES "subjects"("id") ON DELETE CASCADE,
+    "school_year" text NOT NULL,
+    "semester" integer NOT NULL,
+    "kind" text NOT NULL,
+    "slot" integer DEFAULT 1 NOT NULL,
+    "score" numeric(4,2) DEFAULT '0.00' NOT NULL,
+    "score_text" text,
+    "updated_by" integer REFERENCES "users"("id") ON DELETE SET NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "grades_uq" ON "grades" ("student_id","subject_id","school_year","semester","kind","slot")`,
+  `CREATE INDEX IF NOT EXISTS "grades_student_idx" ON "grades" ("student_id")`
+];
+
+let tablesInitialized = false;
+async function ensureTablesExist() {
+  if (tablesInitialized) return;
+  try {
+    await db.select({ id: users.id }).from(users).limit(1);
+    tablesInitialized = true;
+  } catch (err: any) {
+    console.log("Khởi tạo cấu trúc bảng trên database Neon...");
+    for (const stmt of DDL_STATEMENTS) {
+      try {
+        await db.execute(sql.raw(stmt));
+      } catch (e: any) {
+        // Bỏ qua lỗi nếu bảng hoặc index đã tồn tại
+      }
+    }
+    tablesInitialized = true;
+    console.log("Đã khởi tạo xong toàn bộ bảng trên Neon!");
+  }
+}
+
 // ---------- Khởi tạo & đăng nhập ----------
 
 route("GET", "/api/setup-status", async () => {
+  await ensureTablesExist();
   const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
   return json({ needsSetup: admins.length === 0 });
 });
 
 route("POST", "/api/setup", async (c) => {
+  await ensureTablesExist();
   const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
   if (admins.length) fail(409, "Hệ thống đã có tài khoản Quản trị hệ thống.");
   const username = str(c.body.username, 50).toLowerCase();
@@ -93,6 +191,7 @@ route("POST", "/api/setup", async (c) => {
 });
 
 route("POST", "/api/login", async (c) => {
+  await ensureTablesExist();
   const raw = str(c.body.username, 50);
   const username = normalizePhone(raw) && /^[\d\s.+()-]+$/.test(raw) ? normalizePhone(raw)! : raw.toLowerCase();
   const password = typeof c.body.password === "string" ? c.body.password : "";
@@ -782,10 +881,26 @@ route("GET", "/api/my-children/:id/grades", async (c) => {
 
 // ---------- Router xử lý cho Vercel Serverless Function ----------
 
+function getRequestPath(req: any, url: URL): string {
+  // Lấy đường dẫn API thực tế từ Vercel rewrites (query param hoặc header)
+  if (url.searchParams.has("path")) {
+    const p = url.searchParams.get("path")!;
+    return (p.startsWith("/") ? p : `/api/${p}`).replace(/\/+$/, "");
+  }
+  const matched = req.headers?.get?.("x-matched-path") || 
+                  req.headers?.["x-matched-path"] || 
+                  req.headers?.get?.("x-invoke-path") || 
+                  req.headers?.["x-invoke-path"];
+  if (matched && typeof matched === "string" && matched.startsWith("/api")) {
+    return matched.replace(/\/+$/, "");
+  }
+  return url.pathname.replace(/\/+$/, "") || "/";
+}
+
 async function handleRequest(req: Request, url: URL, body: any) {
-  const path = url.pathname.replace(/\/+$/, "") || "/";
+  const path = getRequestPath(req, url);
   const match = routes.find((r) => r.method === req.method && r.pattern.test(path));
-  if (!match) return json({ error: "Không tìm thấy." }, { status: 404 });
+  if (!match) return json({ error: `Không tìm thấy endpoint: ${path}` }, { status: 404 });
   try {
     const ct = req.headers.get("content-type") || "";
     if (req.method !== "GET" && ct && !ct.includes("application/json")) fail(415, "Yêu cầu không hợp lệ.");
@@ -794,16 +909,15 @@ async function handleRequest(req: Request, url: URL, body: any) {
     match.keys.forEach((k, i) => (params[k] = m[i + 1]));
     const user = await getSessionUser(req);
     return await match.handler({ req, user, params, body: body ?? {}, url });
-  } catch (err) {
+  } catch (err: any) {
     if (err instanceof HttpError) return json({ error: err.message }, { status: err.status });
-    console.error(err);
-    return json({ error: "Lỗi máy chủ. Vui lòng thử lại." }, { status: 500 });
+    console.error("API Error at", path, err);
+    const msg = err?.message || String(err) || "Lỗi máy chủ.";
+    return json({ error: msg }, { status: 500 });
   }
 }
 
-// Handler đa năng hỗ trợ cả Web API Request và Node.js req/res
 export default async function handler(req: any, res?: any) {
-  // Trường hợp Vercel gọi theo Node.js Serverless (IncomingMessage, ServerResponse)
   if (res && typeof res.setHeader === "function") {
     const protocol = req.headers["x-forwarded-proto"] || "https";
     const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
@@ -839,7 +953,6 @@ export default async function handler(req: any, res?: any) {
     return res.end(resBody);
   }
 
-  // Trường hợp Vercel gọi theo Web Standard Request
   const url = new URL(req.url);
   const body = req.method === "GET" ? {} : await req.json().catch(() => ({}));
   return await handleRequest(req, url, body);
