@@ -1,6 +1,6 @@
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, createHash, randomInt } from "node:crypto";
 import { promisify } from "node:util";
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, lt } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { classes, parentStudents, sessions, users } from "../db/schema.js";
 
@@ -19,6 +19,9 @@ export type SessionUser = {
   hasChildren: boolean;
   isHomeroom: boolean;
 };
+
+// Dùng để so khớp "giả" khi tên đăng nhập không tồn tại (cân bằng thời gian phản hồi).
+export const DUMMY_HASH = `scrypt$${"00".repeat(16)}$${"00".repeat(32)}`;
 
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
@@ -47,6 +50,8 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 export async function createSession(userId: number): Promise<string> {
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400_000);
+  // Dọn phiên đã hết hạn của chính người dùng này để bảng sessions không phình mãi.
+  await db.delete(sessions).where(and(eq(sessions.userId, userId), lt(sessions.expiresAt, new Date())));
   await db.insert(sessions).values({ tokenHash: sha256(token), userId, expiresAt });
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`;
 }
@@ -89,8 +94,10 @@ export async function getSessionUser(req: Request): Promise<SessionUser | null> 
   if (!rows[0]) return null;
 
   const u = rows[0];
-  const [kid] = await db.select({ studentId: parentStudents.studentId }).from(parentStudents).where(eq(parentStudents.parentId, u.id)).limit(1);
-  const [hr] = await db.select({ id: classes.id }).from(classes).where(eq(classes.homeroomTeacherId, u.id)).limit(1);
+  const [[kid], [hr]] = await Promise.all([
+    db.select({ studentId: parentStudents.studentId }).from(parentStudents).where(eq(parentStudents.parentId, u.id)).limit(1),
+    db.select({ id: classes.id }).from(classes).where(eq(classes.homeroomTeacherId, u.id)).limit(1),
+  ]);
 
   return {
     id: u.id,

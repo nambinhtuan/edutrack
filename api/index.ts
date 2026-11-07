@@ -5,14 +5,19 @@ import {
 } from "../db/schema.js";
 import {
   clearCookie, createSession, destroySession, getSessionUser, hashPassword, normalizePhone,
-  randomPassword, verifyPassword, easyParentPassword, type SessionUser,
+  randomPassword, verifyPassword, easyParentPassword, DUMMY_HASH, type SessionUser,
 } from "./auth.js";
 
 class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 const fail = (status: number, message: string): never => { throw new HttpError(status, message); };
-const json = (data: unknown, init: ResponseInit = {}) => Response.json(data, init);
+// Dữ liệu chứa thông tin cá nhân học sinh/phụ huynh → tuyệt đối không cho trình duyệt/CDN lưu đệm.
+const json = (data: unknown, init: ResponseInit = {}) => {
+  const headers = new Headers(init.headers);
+  headers.set("Cache-Control", "no-store");
+  return Response.json(data, { ...init, headers });
+};
 
 type Ctx = { req: Request; user: SessionUser | null; params: Record<string, string>; body: any; url: URL };
 type Handler = (c: Ctx) => Promise<Response>;
@@ -25,12 +30,14 @@ function route(method: string, path: string, handler: Handler) {
 
 const requireUser = (c: Ctx) => c.user ?? fail(401, "Bạn cần đăng nhập.");
 
+// Quản trị viên: Quản trị hệ thống (admin) hoặc giáo viên được phân quyền quản trị (canManage)
 const requireAdmin = (c: Ctx) => {
   const u = requireUser(c);
   if (u.role !== "admin" && !u.canManage) fail(403, "Bạn không có quyền quản trị này.");
   return u;
 };
 
+// Quản trị hệ thống cao nhất: chỉ tài khoản admin gốc
 const requireSuperAdmin = (c: Ctx) => {
   const u = requireUser(c);
   if (u.role !== "admin" && !u.isSuperAdmin) fail(403, "Chỉ Quản trị hệ thống mới có quyền này.");
@@ -48,13 +55,14 @@ function chunk<T>(arr: T[], size = 200): T[][] {
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
-const MIN_PASSWORD = 6;
+const MIN_PASSWORD = 8;
 const checkNewPassword = (pw: unknown) => {
   if (typeof pw !== "string" || pw.length < MIN_PASSWORD || pw.length > 100)
     fail(400, `Mật khẩu phải có ít nhất ${MIN_PASSWORD} ký tự.`);
   return pw as string;
 };
 
+// Chuẩn hoá điểm nhận xét (Đạt / Chưa đạt)
 function parseCommentGrade(raw: unknown): { score: string; scoreText: string } | null {
   if (raw === null || raw === undefined || raw === "") return null;
   const s = String(raw).trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d");
@@ -67,117 +75,22 @@ function parseCommentGrade(raw: unknown): { score: string; scoreText: string } |
   fail(400, `Giá trị "${raw}" không hợp lệ cho môn nhận xét (chỉ nhận Đ/1/Đạt hoặc CĐ/0/Chưa đạt).`);
 }
 
-// Các câu lệnh DDL riêng rẽ để tạo bảng an toàn trên Neon
-const DDL_STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS "users" (
-    "id" serial PRIMARY KEY,
-    "username" text NOT NULL UNIQUE,
-    "password_hash" text NOT NULL,
-    "full_name" text DEFAULT '' NOT NULL,
-    "role" text NOT NULL,
-    "can_manage" boolean DEFAULT false NOT NULL,
-    "is_super_admin" boolean DEFAULT false NOT NULL,
-    "is_active" boolean DEFAULT true NOT NULL,
-    "must_change_password" boolean DEFAULT true NOT NULL,
-    "failed_attempts" integer DEFAULT 0 NOT NULL,
-    "locked_until" timestamp with time zone,
-    "created_at" timestamp with time zone DEFAULT now() NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS "sessions" (
-    "token_hash" text PRIMARY KEY,
-    "user_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
-    "expires_at" timestamp with time zone NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS "classes" (
-    "id" serial PRIMARY KEY,
-    "name" text NOT NULL,
-    "school_year" text NOT NULL,
-    "homeroom_teacher_id" integer REFERENCES "users"("id") ON DELETE SET NULL
-  )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS "classes_name_year_uq" ON "classes" ("name","school_year")`,
-  `CREATE TABLE IF NOT EXISTS "subjects" (
-    "id" serial PRIMARY KEY,
-    "name" text NOT NULL UNIQUE,
-    "sort_order" integer DEFAULT 0 NOT NULL,
-    "evaluation_type" text DEFAULT 'score' NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS "students" (
-    "id" serial PRIMARY KEY,
-    "student_code" text NOT NULL UNIQUE,
-    "class_id" integer REFERENCES "classes"("id") ON DELETE SET NULL,
-    "full_name" text NOT NULL,
-    "date_of_birth" text,
-    "gender" text,
-    "address" text,
-    "father_name" text,
-    "father_phone" text,
-    "mother_name" text,
-    "mother_phone" text,
-    "note" text,
-    "created_at" timestamp with time zone DEFAULT now() NOT NULL
-  )`,
-  `CREATE INDEX IF NOT EXISTS "students_class_idx" ON "students" ("class_id")`,
-  `CREATE TABLE IF NOT EXISTS "parent_students" (
-    "parent_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
-    "student_id" integer NOT NULL REFERENCES "students"("id") ON DELETE CASCADE,
-    PRIMARY KEY ("parent_id", "student_id")
-  )`,
-  `CREATE TABLE IF NOT EXISTS "teacher_assignments" (
-    "id" serial PRIMARY KEY,
-    "teacher_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
-    "class_id" integer NOT NULL REFERENCES "classes"("id") ON DELETE CASCADE,
-    "subject_id" integer NOT NULL REFERENCES "subjects"("id") ON DELETE CASCADE
-  )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS "assign_uq" ON "teacher_assignments" ("teacher_id","class_id","subject_id")`,
-  `CREATE TABLE IF NOT EXISTS "grades" (
-    "id" serial PRIMARY KEY,
-    "student_id" integer NOT NULL REFERENCES "students"("id") ON DELETE CASCADE,
-    "subject_id" integer NOT NULL REFERENCES "subjects"("id") ON DELETE CASCADE,
-    "school_year" text NOT NULL,
-    "semester" integer NOT NULL,
-    "kind" text NOT NULL,
-    "slot" integer DEFAULT 1 NOT NULL,
-    "score" numeric(4,2) DEFAULT '0.00' NOT NULL,
-    "score_text" text,
-    "updated_by" integer REFERENCES "users"("id") ON DELETE SET NULL,
-    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
-  )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS "grades_uq" ON "grades" ("student_id","subject_id","school_year","semester","kind","slot")`,
-  `CREATE INDEX IF NOT EXISTS "grades_student_idx" ON "grades" ("student_id")`
-];
-
-let tablesInitialized = false;
-async function ensureTablesExist() {
-  if (tablesInitialized) return;
-  try {
-    await db.select({ id: users.id }).from(users).limit(1);
-    tablesInitialized = true;
-  } catch (err: any) {
-    console.log("Khởi tạo cấu trúc bảng trên database Neon...");
-    for (const stmt of DDL_STATEMENTS) {
-      try {
-        await db.execute(sql.raw(stmt));
-      } catch (e: any) {
-        // Bỏ qua lỗi nếu bảng hoặc index đã tồn tại
-      }
-    }
-    tablesInitialized = true;
-    console.log("Đã khởi tạo xong toàn bộ bảng trên Neon!");
-  }
-}
-
 // ---------- Khởi tạo & đăng nhập ----------
 
+// Nếu đặt biến môi trường SETUP_KEY, người khởi tạo phải nhập đúng mã này (chống người lạ chiếm quyền
+// Quản trị hệ thống khi website vừa được đưa lên mạng nhưng chủ chưa kịp khởi tạo).
+const setupKey = () => (process.env.SETUP_KEY || "").trim();
+
 route("GET", "/api/setup-status", async () => {
-  await ensureTablesExist();
   const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
-  return json({ needsSetup: admins.length === 0 });
+  return json({ needsSetup: admins.length === 0, requiresKey: Boolean(setupKey()) });
 });
 
 route("POST", "/api/setup", async (c) => {
-  await ensureTablesExist();
   const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
   if (admins.length) fail(409, "Hệ thống đã có tài khoản Quản trị hệ thống.");
+  const key = setupKey();
+  if (key && str(c.body.setupKey, 200) !== key) fail(403, "Mã khởi tạo không đúng.");
   const username = str(c.body.username, 50).toLowerCase();
   const fullName = str(c.body.fullName, 100);
   if (!/^[a-z0-9._-]{3,50}$/.test(username)) fail(400, "Tên đăng nhập 3–50 ký tự, chỉ gồm chữ không dấu, số, dấu . _ -");
@@ -187,17 +100,25 @@ route("POST", "/api/setup", async (c) => {
     canManage: true, isSuperAdmin: true,
     passwordHash: await hashPassword(password), mustChangePassword: false,
   }).returning({ id: users.id });
+  // Chống đua (2 người bấm khởi tạo cùng lúc): chỉ tài khoản admin tạo sớm nhất được giữ lại.
+  const [first] = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).orderBy(asc(users.id)).limit(1);
+  if (first && first.id !== u.id) {
+    await db.delete(users).where(eq(users.id, u.id));
+    fail(409, "Hệ thống đã có tài khoản Quản trị hệ thống.");
+  }
   return json({ ok: true }, { headers: { "Set-Cookie": await createSession(u.id) } });
 });
 
 route("POST", "/api/login", async (c) => {
-  await ensureTablesExist();
   const raw = str(c.body.username, 50);
   const username = normalizePhone(raw) && /^[\d\s.+()-]+$/.test(raw) ? normalizePhone(raw)! : raw.toLowerCase();
   const password = typeof c.body.password === "string" ? c.body.password : "";
   const [u] = await db.select().from(users).where(eq(users.username, username)).limit(1);
   const wrong = "Tên đăng nhập hoặc mật khẩu không đúng.";
-  if (!u || !u.isActive) fail(401, wrong);
+  if (!u || !u.isActive) {
+    await verifyPassword(password, DUMMY_HASH); // giữ thời gian phản hồi tương đương, tránh dò tên đăng nhập
+    fail(401, wrong);
+  }
   if (u.lockedUntil && u.lockedUntil > new Date())
     fail(429, "Tài khoản tạm khoá do nhập sai nhiều lần. Vui lòng thử lại sau 15 phút.");
   if (!(await verifyPassword(password, u.passwordHash))) {
@@ -368,10 +289,12 @@ route("PUT", "/api/teachers/:id", async (c) => {
 
   const [target] = await db.select({ role: users.role, isSuperAdmin: users.isSuperAdmin }).from(users).where(eq(users.id, id));
   if (!target) fail(404, "Không tìm thấy người dùng.");
+  if (target.role !== "teacher" && target.role !== "admin") fail(404, "Không tìm thấy giáo viên.");
   if (target.isSuperAdmin && !me.isSuperAdmin) fail(403, "Không thể sửa Quản trị hệ thống.");
+  if (id === me.id && c.body.isActive === false) fail(400, "Không thể tự khoá tài khoản của chính mình.");
 
   const updateData: Record<string, any> = { fullName, isActive: c.body.isActive !== false };
-  if (me.isSuperAdmin && typeof c.body.canManage === "boolean") {
+  if (me.isSuperAdmin && target.role === "teacher" && typeof c.body.canManage === "boolean") {
     updateData.canManage = c.body.canManage;
   }
 
@@ -402,9 +325,11 @@ async function parentEasyPassword(parentId: number): Promise<string | null> {
 route("POST", "/api/users/:id/reset-password", async (c) => {
   const me = requireAdmin(c);
   const id = intParam(c.params.id);
-  const [target] = await db.select({ role: users.role, isSuperAdmin: users.isSuperAdmin }).from(users).where(eq(users.id, id));
+  const [target] = await db.select({ role: users.role, isSuperAdmin: users.isSuperAdmin, canManage: users.canManage }).from(users).where(eq(users.id, id));
   if (!target) fail(404, "Không tìm thấy tài khoản.");
   if (target.isSuperAdmin && !me.isSuperAdmin) fail(403, "Chỉ Quản trị hệ thống mới có thể đặt lại mật khẩu của chính mình.");
+  // Giáo viên được cấp quyền quản trị không được cấp lại mật khẩu của người cùng cấp (tránh chiếm tài khoản).
+  if (!me.isSuperAdmin && target.role !== "parent" && target.canManage) fail(403, "Chỉ Quản trị hệ thống mới đặt lại được mật khẩu của quản trị viên.");
 
   const password = (target.role === "parent" ? await parentEasyPassword(id) : null) ?? randomPassword();
   const [row] = await db.update(users).set({
@@ -445,6 +370,13 @@ route("DELETE", "/api/assignments/:id", async (c) => {
 });
 
 // ---------- Hồ sơ học sinh ----------
+
+async function validClassId(v: unknown): Promise<number | null> {
+  if (v === null || v === undefined || v === "") return null;
+  const id = intParam(v);
+  const [cl] = await db.select({ id: classes.id }).from(classes).where(eq(classes.id, id));
+  return cl ? id : fail(400, "Lớp không tồn tại.");
+}
 
 const studentCols = {
   id: students.id, studentCode: students.studentCode, classId: students.classId, fullName: students.fullName,
@@ -494,7 +426,7 @@ type StudentInput = {
   studentCode: string; fullName: string; dateOfBirth: string | null; gender: string | null; address: string | null;
   fatherName: string | null; fatherPhone: string | null; motherName: string | null; motherPhone: string | null; note: string | null;
 };
-function studentInput(b: any): { data: StudentInput; errors: string[] } {
+function studentInput(b: any, deterministic = false): { data: StudentInput; errors: string[] } {
   const errors: string[] = [];
   const fullName = str(b.fullName, 100);
   if (!fullName) errors.push("thiếu họ tên");
@@ -512,10 +444,15 @@ function studentInput(b: any): { data: StudentInput; errors: string[] } {
   let studentCode = str(b.studentCode, 30);
   if (!studentCode && fullName) {
     const slug = fullName.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").replace(/[^a-z0-9]/gi, "").toUpperCase();
-    const dobPart = str(b.dateOfBirth).replace(/\D/g, "") || "0";
-    const classPart = str(b.className || "").replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 5) || "K";
-    const randPart = randomPassword(4).toUpperCase();
-    studentCode = `HS-${slug.slice(0, 10)}-${dobPart}-${classPart}-${randPart}`;
+    const dobPart = str(b.dateOfBirth).replace(/\D/g, "");
+    if (deterministic && dobPart) {
+      // Mã xác định (tên + ngày sinh): nhập lại cùng một file không sinh học sinh trùng lặp,
+      // và khi lên lớp mới vẫn cập nhật đúng học sinh cũ (giữ nguyên điểm).
+      studentCode = `HS-${slug.slice(0, 14)}-${dobPart}`;
+    } else {
+      const classPart = str(b.className || "").replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 5) || "K";
+      studentCode = `HS-${slug.slice(0, 10)}-${dobPart || "0"}-${classPart}-${randomPassword(4).toUpperCase()}`;
+    }
   }
   return {
     errors,
@@ -564,14 +501,14 @@ async function syncParents(list: ParentSyncItem[]) {
   const done = created.filter((a) => existing.has(a.phone));
   const randomOnes = done.filter((a) => !a.easy).length;
   if (randomOnes) warnings.push(`${randomOnes} tài khoản phụ huynh dùng mật khẩu ngẫu nhiên vì học sinh thiếu ngày sinh hoặc ngày sinh không đúng dạng dd/mm/yyyy.`);
-  return { created: done.map(({ easy, ...a }) => a), warnings };
+  return { created: done.map(({ easy, ...a }) => a), warnings, randomOnes };
 }
 
 route("POST", "/api/students", async (c) => {
   requireAdmin(c);
   const { data, errors } = studentInput(c.body);
   if (errors.length) fail(400, "Dữ liệu chưa hợp lệ: " + errors.join("; "));
-  const classId = c.body.classId ? intParam(c.body.classId) : null;
+  const classId = await validClassId(c.body.classId);
   const [row] = await db.insert(students).values({ ...data, classId }).onConflictDoNothing().returning({ id: students.id });
   if (!row) fail(409, "Mã học sinh đã tồn tại.");
   const phones = [
@@ -587,7 +524,9 @@ route("PUT", "/api/students/:id", async (c) => {
   const id = intParam(c.params.id);
   const { data, errors } = studentInput(c.body);
   if (errors.length) fail(400, "Dữ liệu chưa hợp lệ: " + errors.join("; "));
-  const classId = c.body.classId ? intParam(c.body.classId) : null;
+  const classId = await validClassId(c.body.classId);
+  const [exists] = await db.select({ id: students.id }).from(students).where(eq(students.id, id));
+  if (!exists) fail(404, "Không tìm thấy học sinh.");
   try {
     await db.update(students).set({ ...data, classId }).where(eq(students.id, id));
   } catch { fail(409, "Mã học sinh bị trùng."); }
@@ -616,14 +555,14 @@ route("POST", "/api/students/import", async (c) => {
   if (!YEAR_RE.test(schoolYear)) fail(400, "Năm học có dạng 2025-2026.");
   const rows: any[] = Array.isArray(c.body.rows) ? c.body.rows : [];
   if (!rows.length) fail(400, "File không có dòng dữ liệu nào.");
-  if (rows.length > 3000) fail(400, "Mỗi lần chỉ nhập tối đa 3000 học sinh.");
+  if (rows.length > 500) fail(400, "Mỗi lượt gửi tối đa 500 học sinh (giao diện tự chia nhỏ file lớn).");
 
   const errors: string[] = [];
   const valid: (StudentInput & { className: string })[] = [];
   const seen = new Set<string>();
   rows.forEach((r, i) => {
     const line = Number(r._row) || i + 2;
-    const { data, errors: errs } = studentInput(r);
+    const { data, errors: errs } = studentInput(r, true);
     const className = str(r.className, 30).replace(/^lớp\s+/i, "").toUpperCase();
     if (!className) errs.push("thiếu lớp");
     if (data.studentCode && seen.has(data.studentCode)) errs.push(`mã học sinh ${data.studentCode} bị lặp trong file`);
@@ -661,11 +600,14 @@ route("POST", "/api/students/import", async (c) => {
       v.motherPhone && { phone: v.motherPhone, name: v.motherName },
     ].filter(Boolean) as { phone: string; name: string | null }[],
   }));
-  const { created, warnings } = await syncParents(parentList);
+  const { created, warnings, randomOnes } = await syncParents(parentList);
   const noPhone = valid.filter((v) => !v.fatherPhone && !v.motherPhone).length;
   if (noPhone) warnings.push(`${noPhone} học sinh không có SĐT bố/mẹ nên chưa có tài khoản phụ huynh.`);
 
-  return json({ imported: valid.length, classesTouched: classNames.length, errors, warnings, newAccounts: created });
+  return json({
+    imported: valid.length, classesTouched: classNames.length, classNames, errors, warnings, newAccounts: created,
+    randomOnes, noPhone,
+  });
 });
 
 route("GET", "/api/parents", async (c) => {
@@ -792,7 +734,11 @@ route("PUT", "/api/grades", async (c) => {
   const upserts: (typeof grades.$inferInsert)[] = [];
   const deletes: { studentId: number; kind: string; slot: number }[] = [];
 
-  for (const e of entries) {
+  // Nếu cùng một ô xuất hiện nhiều lần trong yêu cầu, giữ lần cuối (tránh lỗi "ON CONFLICT ... a second time").
+  const lastByCell = new Map<string, any>();
+  for (const e of entries) lastByCell.set(`${Number(e.studentId)}:${String(e.kind)}:${Number(e.slot) || 1}`, e);
+
+  for (const e of lastByCell.values()) {
     const studentId = Number(e.studentId), slot = Number(e.slot) || 1, kind = String(e.kind);
     if (!inClass.has(studentId)) fail(400, "Học sinh không thuộc lớp này.");
     if (!["tx", "gk", "ck"].includes(kind) || !Number.isInteger(slot) || slot < 1 || slot > 10 || (kind !== "tx" && slot !== 1))
@@ -881,43 +827,38 @@ route("GET", "/api/my-children/:id/grades", async (c) => {
 
 // ---------- Router xử lý cho Vercel Serverless Function ----------
 
-function getRequestPath(req: any, url: URL): string {
-  // Lấy đường dẫn API thực tế từ Vercel rewrites (query param hoặc header)
-  if (url.searchParams.has("path")) {
-    const p = url.searchParams.get("path")!;
-    return (p.startsWith("/") ? p : `/api/${p}`).replace(/\/+$/, "");
-  }
-  const matched = req.headers?.get?.("x-matched-path") || 
-                  req.headers?.["x-matched-path"] || 
-                  req.headers?.get?.("x-invoke-path") || 
-                  req.headers?.["x-invoke-path"];
-  if (matched && typeof matched === "string" && matched.startsWith("/api")) {
-    return matched.replace(/\/+$/, "");
-  }
-  return url.pathname.replace(/\/+$/, "") || "/";
-}
+const MUST_CHANGE_ALLOWED = ["/api/me", "/api/logout", "/api/change-password"];
 
 async function handleRequest(req: Request, url: URL, body: any) {
-  const path = getRequestPath(req, url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
   const match = routes.find((r) => r.method === req.method && r.pattern.test(path));
-  if (!match) return json({ error: `Không tìm thấy endpoint: ${path}` }, { status: 404 });
+  if (!match) return json({ error: "Không tìm thấy." }, { status: 404 });
   try {
-    const ct = req.headers.get("content-type") || "";
-    if (req.method !== "GET" && ct && !ct.includes("application/json")) fail(415, "Yêu cầu không hợp lệ.");
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      // Chống CSRF nhiều lớp: cookie SameSite=Lax + bắt buộc JSON + từ chối yêu cầu cross-site do trình duyệt báo.
+      const ct = req.headers.get("content-type") || "";
+      if (!ct.includes("application/json")) fail(415, "Yêu cầu không hợp lệ.");
+      const site = req.headers.get("sec-fetch-site");
+      if (site && site !== "same-origin" && site !== "none") fail(403, "Yêu cầu bị từ chối.");
+    }
     const m = path.match(match.pattern)!;
     const params: Record<string, string> = {};
     match.keys.forEach((k, i) => (params[k] = m[i + 1]));
     const user = await getSessionUser(req);
+    // Tài khoản đang dùng mật khẩu do hệ thống cấp phải đổi mật khẩu trước khi dùng bất kỳ chức năng nào khác.
+    if (user?.mustChangePassword && !MUST_CHANGE_ALLOWED.includes(path))
+      fail(403, "MUST_CHANGE_PASSWORD");
     return await match.handler({ req, user, params, body: body ?? {}, url });
-  } catch (err: any) {
+  } catch (err) {
     if (err instanceof HttpError) return json({ error: err.message }, { status: err.status });
-    console.error("API Error at", path, err);
-    const msg = err?.message || String(err) || "Lỗi máy chủ.";
-    return json({ error: msg }, { status: 500 });
+    console.error(err);
+    return json({ error: "Lỗi máy chủ. Vui lòng thử lại." }, { status: 500 });
   }
 }
 
+// Handler đa năng hỗ trợ cả Web API Request và Node.js req/res
 export default async function handler(req: any, res?: any) {
+  // Trường hợp Vercel gọi theo Node.js Serverless (IncomingMessage, ServerResponse)
   if (res && typeof res.setHeader === "function") {
     const protocol = req.headers["x-forwarded-proto"] || "https";
     const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
@@ -953,6 +894,7 @@ export default async function handler(req: any, res?: any) {
     return res.end(resBody);
   }
 
+  // Trường hợp Vercel gọi theo Web Standard Request
   const url = new URL(req.url);
   const body = req.method === "GET" ? {} : await req.json().catch(() => ({}));
   return await handleRequest(req, url, body);

@@ -1,5 +1,5 @@
 // EduTrack – giao diện web quản lý điểm THCS theo Thông tư 22/2021/TT-BGDĐT
-// Hoạt động trên Netlify Functions v2 + Netlify Database (PostgreSQL).
+// Chạy trên Vercel (Serverless Function) + Neon PostgreSQL.
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -23,6 +23,7 @@ async function api(method, path, body) {
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && path !== "/api/login" && path !== "/api/change-password") { me = null; render(); }
+  if (res.status === 403 && data.error === "MUST_CHANGE_PASSWORD" && me) { me.mustChangePassword = true; render(); throw new Error("Bạn cần đổi mật khẩu trước khi tiếp tục."); }
   if (!res.ok) throw new Error(data.error || `Lỗi ${res.status}`);
   return data;
 }
@@ -103,8 +104,8 @@ async function boot() {
     const { user } = await api("GET", "/api/me");
     me = user;
     if (!me) {
-      const { needsSetup } = await api("GET", "/api/setup-status");
-      if (needsSetup) return renderSetup();
+      const { needsSetup, requiresKey } = await api("GET", "/api/setup-status");
+      if (needsSetup) return renderSetup(requiresKey);
     }
   } catch (e) {
     app.innerHTML = `<div class="login"><div class="card"><div class="notice err">Không kết nối được máy chủ: ${esc(e.message)}</div></div></div>`;
@@ -116,8 +117,34 @@ window.addEventListener("hashchange", () => me && renderPage());
 
 function render() {
   if (!me) return renderLogin();
+  if (me.mustChangePassword) return renderForcedPasswordChange();
   renderShell();
   renderPage();
+}
+
+// Tài khoản dùng mật khẩu do hệ thống cấp: bắt buộc đặt mật khẩu mới trước khi vào hệ thống.
+function renderForcedPasswordChange() {
+  loginFrame(`<h1>Đặt mật khẩu mới</h1>
+    <p>Bạn đang dùng mật khẩu do hệ thống cấp. Vì an toàn thông tin học sinh, vui lòng đặt mật khẩu mới (ít nhất 8 ký tự) để tiếp tục.</p>
+    <form id="f">
+      <label class="field"><span>Mật khẩu hiện tại</span><input type="password" name="oldPassword" required autocomplete="current-password"></label>
+      <label class="field"><span>Mật khẩu mới (ít nhất 8 ký tự)</span><input type="password" name="newPassword" required minlength="8" autocomplete="new-password"></label>
+      <label class="field"><span>Nhập lại mật khẩu mới</span><input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label>
+      <button class="btn">Lưu mật khẩu mới</button>
+      <button type="button" class="btn ghost" id="out2">Đăng xuất</button>
+    </form>`);
+  $("#out2").onclick = () => attempt(async () => { await api("POST", "/api/logout", {}); me = null; location.hash = ""; render(); });
+  $("#f").onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    attempt(async () => {
+      if (fd.get("newPassword") !== fd.get("confirm")) throw new Error("Hai lần nhập mật khẩu mới không khớp.");
+      if (fd.get("newPassword") === fd.get("oldPassword")) throw new Error("Mật khẩu mới phải khác mật khẩu hiện tại.");
+      await api("POST", "/api/change-password", { oldPassword: fd.get("oldPassword"), newPassword: fd.get("newPassword") });
+      toast("Đã đổi mật khẩu.");
+      await boot();
+    }, e.submitter);
+  };
 }
 
 function loginFrame(inner) {
@@ -126,13 +153,14 @@ function loginFrame(inner) {
     ${inner}</div></div>`;
 }
 
-function renderSetup() {
+function renderSetup(requiresKey = false) {
   loginFrame(`<h1>Khởi tạo hệ thống</h1>
     <p>Tạo tài khoản <b>Quản trị hệ thống</b> đầu tiên. Tài khoản này có quyền cao nhất: phân quyền quản trị cho giáo viên, quản lý lớp, học sinh và môn học.</p>
     <form id="f">
       <label class="field"><span>Họ và tên Quản trị hệ thống</span><input type="text" name="fullName" required placeholder="VD: Thầy Nguyễn Văn A"></label>
       <label class="field"><span>Tên đăng nhập (chữ không dấu, số)</span><input type="text" name="username" required autocomplete="username" pattern="[A-Za-z0-9._\\-]{3,50}" placeholder="VD: admin"></label>
-      <label class="field"><span>Mật khẩu (ít nhất 6 ký tự)</span><input type="password" name="password" required minlength="6" autocomplete="new-password"></label>
+      <label class="field"><span>Mật khẩu (ít nhất 8 ký tự)</span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+      ${requiresKey ? `<label class="field"><span>Mã khởi tạo (biến SETUP_KEY đã khai báo trên Vercel)</span><input type="password" name="setupKey" required autocomplete="off"></label>` : ""}
       <button class="btn">Tạo tài khoản Quản trị hệ thống</button>
     </form>`);
   $("#f").onsubmit = (e) => {
@@ -217,8 +245,8 @@ function renderShell() {
 function changePasswordModal() {
   openModal(`<h2>Đổi mật khẩu</h2>
     <label class="field"><span>Mật khẩu hiện tại</span><input type="password" name="oldPassword" required autocomplete="current-password"></label>
-    <label class="field"><span>Mật khẩu mới (ít nhất 6 ký tự)</span><input type="password" name="newPassword" required minlength="6" autocomplete="new-password"></label>
-    <label class="field"><span>Nhập lại mật khẩu mới</span><input type="password" name="confirm" required minlength="6" autocomplete="new-password"></label>
+    <label class="field"><span>Mật khẩu mới (ít nhất 8 ký tự)</span><input type="password" name="newPassword" required minlength="8" autocomplete="new-password"></label>
+    <label class="field"><span>Nhập lại mật khẩu mới</span><input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label>
     <div class="actions"><button class="btn ghost" value="cancel" formnovalidate>Huỷ</button><button class="btn" value="ok">Lưu</button></div>`,
     async (fd) => {
       if (fd.get("newPassword") !== fd.get("confirm")) throw new Error("Hai lần nhập mật khẩu mới không khớp.");
@@ -347,7 +375,7 @@ async function viewStudents(page) {
   const canEdit = me.role === "admin" || me.canManage;
   const [classList, list] = await Promise.all([
     canEdit ? api("GET", "/api/classes") : Promise.resolve([]),
-    api("GET", "/api/students" + (params.get("classId") ? `?classId=${params.get("classId")}` : "")),
+    api("GET", "/api/students" + (params.get("classId") ? `?classId=${encodeURIComponent(params.get("classId"))}` : "")),
   ]);
   const sel = params.get("classId") || "";
 
@@ -457,9 +485,31 @@ function renderImport(area, done) {
       ${parsed.rows.length > 8 ? `<p class="muted">… và ${parsed.rows.length - 8} dòng khác.</p>` : ""}
       <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn" id="go">Nhập ${parsed.rows.length} học sinh</button></div>`;
     $("#go", area).onclick = (ev) => attempt(async () => {
-      ev.target.textContent = "Đang nhập…";
-      const res = await api("POST", "/api/students/import", { schoolYear: $("#yr", area).value.trim(), rows: parsed.rows });
-      showImportResult(area, res, done);
+      // File lớn được chia thành từng lượt nhỏ để không vượt thời gian tối đa của Serverless Function
+      // (mỗi tài khoản phụ huynh mới phải băm mật khẩu, khá tốn CPU).
+      const BATCH = 100, schoolYear = $("#yr", area).value.trim();
+      const total = { imported: 0, classesTouched: 0, errors: [], warnings: [], newAccounts: [] };
+      const classSet = new Set();
+      let randomOnes = 0, noPhone = 0;
+      for (let i = 0; i < parsed.rows.length; i += BATCH) {
+        ev.target.textContent = `Đang nhập ${Math.min(i + BATCH, parsed.rows.length)}/${parsed.rows.length}…`;
+        const part = parsed.rows.slice(i, i + BATCH);
+        let r;
+        try { r = await api("POST", "/api/students/import", { schoolYear, rows: part }); }
+        catch (err) {
+          total.errors.push(`Dừng ở dòng ${part[0]?._row ?? i + 2}: ${err.message}. Các dòng trước đó đã được nhập; có thể chọn lại file để nhập tiếp (nhập lại không tạo học sinh trùng khi có Mã HS hoặc Ngày sinh).`);
+          break;
+        }
+        total.imported += r.imported;
+        r.classNames.forEach((n) => classSet.add(n));
+        total.errors.push(...r.errors);
+        randomOnes += r.randomOnes; noPhone += r.noPhone;
+        total.newAccounts.push(...r.newAccounts);
+      }
+      total.classesTouched = classSet.size;
+      if (randomOnes) total.warnings.push(`${randomOnes} tài khoản phụ huynh dùng mật khẩu ngẫu nhiên vì học sinh thiếu ngày sinh hoặc ngày sinh không đúng dạng dd/mm/yyyy.`);
+      if (noPhone) total.warnings.push(`${noPhone} học sinh không có SĐT bố/mẹ nên chưa có tài khoản phụ huynh.`);
+      showImportResult(area, total, done);
     }, ev.target);
   });
 }
@@ -877,7 +927,7 @@ async function viewParents(page) {
       ${rows.map((p) => `<tr><td class="nowrap"><b>${esc(p.username)}</b></td><td>${esc(p.fullName)}</td><td>${esc(p.children) || `<span class="muted">—</span>`}</td>
         <td>${!p.isActive ? `<span class="tag off">Đã khoá</span>` : p.mustChangePassword ? `<span class="tag">Chưa đổi mật khẩu</span>` : `<span class="tag ok">Đã đổi mật khẩu</span>`}</td>
         <td><div class="actions"><button class="btn ghost small" data-reset="${p.id}">Cấp lại MK</button>
-        <button class="btn ghost small" data-toggle="${p.id}">${p.isActive ? "Khoá" : "Mở khoá"}</button><button class="btn danger small" data-del="${p.id}">Xoá</button></div></td></tr>`).join("")}
+        <button class="btn ghost small" data-toggle="${p.id}">${p.isActive ? "Khoá" : "Mở khoá"}</button>${me.role === "admin" || me.isSuperAdmin ? `<button class="btn danger small" data-del="${p.id}">Xoá</button>` : ""}</div></td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">Chưa có tài khoản phụ huynh. Tài khoản sẽ được tạo khi bạn nhập hồ sơ học sinh có SĐT bố/mẹ.</div>`;
   };
   draw();

@@ -21,28 +21,29 @@ Website triển khai trên **Vercel** (Serverless + Frontend) kết hợp **Neon
 ---
 
 ### BƯỚC 2: Đưa mã nguồn lên GitHub
-1. Giải nén file ZIP `edutrack-hoan-thien.zip`.
-2. Mở GitHub, tạo repository mới (ví dụ đặt tên là `edutrack`), chọn chế độ **Public** hoặc **Private**.
-3. Chọn **Add file** → **Upload files**.
-4. Kéo thả **toàn bộ nội dung bên trong** thư mục vừa giải nén lên GitHub:
-   - Các thư mục: `api`, `db`, `migrations`, `public`
-   - Các file: `package.json`, `package-lock.json`, `vercel.json`, `drizzle.config.ts`, `.gitignore`, `README_HUONG_DAN.md`
-5. Chọn **"Commit directly to the main branch"** và bấm **Commit changes**.
+Cách nhanh nhất (dòng lệnh, giữ được toàn bộ file ẩn như `.gitignore`):
+```bash
+unzip edutrack-vercel-neon-v2.zip -d edutrack && cd edutrack
+git init -b main
+git add .
+git commit -m "EduTrack v2"
+git remote add origin https://github.com/<tên-bạn>/edutrack.git
+git push -u origin main
+```
+Hoặc dùng giao diện web: tạo repository trống → **Add file → Upload files** → kéo thả **toàn bộ nội dung bên trong** thư mục đã giải nén (nhớ cả file `.gitignore`, `.env.example`).
+> ⚠️ Không bao giờ commit file `.env` hoặc chuỗi kết nối Neon lên GitHub, kể cả repository Private.
 
 ---
 
 ### BƯỚC 3: Triển khai trên Vercel
 1. Truy cập [https://vercel.com](https://vercel.com) và đăng nhập bằng tài khoản **GitHub**.
-2. Tại bảng điều khiển Dashboard, bấm **Add New...** → **Project**.
-3. Chọn repository `edutrack` bạn vừa tải lên và bấm **Import**.
-4. Tại màn hình cấu hình dự án (*Configure Project*):
-   - **Framework Preset**: Để nguyên `Other`.
-   - Mở mục **Environment Variables** (Biến môi trường):
-     - **Key (Tên biến)**: Nhập chính xác chữ: `DATABASE_URL`
-     - **Value (Giá trị)**: Dán chuỗi kết nối Neon bạn đã copy ở **Bước 1**.
-     - Bấm nút **Add**.
-5. Bấm nút **Deploy**.
-6. Vercel sẽ tự động cài đặt thư viện, chạy lệnh migrate tạo toàn bộ các bảng trong cơ sở dữ liệu Neon, và cấp cho bạn một đường link tên miền miễn phí (ví dụ: `https://edutrack-xxx.vercel.app`).
+2. **Add New... → Project** → chọn repository `edutrack` → **Import**.
+3. Tại *Configure Project*: **Framework Preset** để `Other`; mở **Environment Variables** và thêm:
+   - `DATABASE_URL` = chuỗi kết nối Neon ở Bước 1.
+   - `SETUP_KEY` = một chuỗi bí mật bạn tự đặt (khuyến nghị, ví dụ 16 ký tự ngẫu nhiên). Sẽ được hỏi khi khởi tạo hệ thống lần đầu.
+4. Bấm **Deploy**. Vercel chạy migrate để tạo bảng trong Neon, rồi cấp link dạng `https://edutrack-xxx.vercel.app`.
+
+**Lưu ý quan trọng về môi trường Preview:** mỗi lần build, hệ thống chạy migrate trên database ở `DATABASE_URL`. Nếu bạn dùng cùng một `DATABASE_URL` cho cả *Production* và *Preview*, các nhánh thử nghiệm sẽ tác động lên dữ liệu thật. Nên tạo một **branch database** riêng trên Neon cho Preview và đặt `DATABASE_URL` khác nhau theo từng môi trường (Vercel → Settings → Environment Variables → chọn môi trường).
 
 ---
 
@@ -50,7 +51,8 @@ Website triển khai trên **Vercel** (Serverless + Frontend) kết hợp **Neon
 1. Mở đường link website Vercel vừa cấp.
 2. Màn hình **Khởi tạo hệ thống** sẽ xuất hiện lần đầu tiên:
    - Nhập họ tên của bạn (Quản trị hệ thống).
-   - Nhập tên đăng nhập và mật khẩu quản trị.
+   - Nhập tên đăng nhập và mật khẩu quản trị (ít nhất 8 ký tự).
+   - Nhập **Mã khởi tạo** (chính là `SETUP_KEY` đã khai báo ở Bước 3, nếu có).
    - Bấm **Tạo tài khoản Quản trị hệ thống**.
 3. Vào mục **Môn học**, bấm nút **Tạo 12 môn THCS chuẩn (CT GDPT 2018)** để hệ thống tự điền sẵn các môn chuẩn theo Thông tư 22.
 
@@ -80,5 +82,16 @@ Website triển khai trên **Vercel** (Serverless + Frontend) kết hợp **Neon
 ### 3. Nhập học sinh & Tự động tạo tài khoản phụ huynh
 * Vào mục **Hồ sơ học sinh** → bấm **Nhập từ Excel**.
 * Hệ thống tự động nhận diện nhiều dạng tên cột tiếng Việt (*Mã HS, Họ tên, Lớp, Ngày sinh, SĐT bố, SĐT mẹ...*).
-* Tự động cấp tài khoản phụ huynh bằng **Số điện thoại** với mật khẩu dễ nhớ: `tên con (không dấu) + ngày sinh dạng ddmm` (ví dụ: học sinh Hà Văn Bằng sinh ngày 21/03/2015 $\rightarrow$ mật khẩu là `bang2103`).
+* Tự động cấp tài khoản phụ huynh bằng **Số điện thoại** với mật khẩu ban đầu dễ nhớ (phụ huynh **bắt buộc đổi** ngay lần đăng nhập đầu tiên): `tên con (không dấu) + ngày sinh dạng ddmm` (ví dụ: học sinh Hà Văn Bằng sinh ngày 21/03/2015 $\rightarrow$ mật khẩu là `bang2103`).
 * Sau khi nhập, bạn có thể tải file Excel danh sách tài khoản để in và gửi cho phụ huynh.
+
+### 4. Nhập file lớn
+Giao diện tự chia file Excel thành từng lượt 100 học sinh để không vượt thời gian tối đa của máy chủ. Khi **Mã HS để trống** nhưng có **Ngày sinh**, hệ thống sinh mã cố định theo *họ tên + ngày sinh*, nên nhập lại cùng file hoặc nhập danh sách năm sau sẽ **cập nhật** đúng học sinh cũ (giữ nguyên điểm), không tạo bản sao.
+
+---
+
+## 🔐 Lưu ý bảo mật & vận hành
+* Dữ liệu điểm, số điện thoại, địa chỉ của học sinh (trẻ em) là **dữ liệu cá nhân** – chỉ cấp quyền quản trị cho người thật sự cần, và thông báo cho phụ huynh về mục đích sử dụng.
+* Mật khẩu hệ thống cấp (giáo viên, phụ huynh) đều bắt buộc đổi ở lần đăng nhập đầu.
+* **Sao lưu:** định kỳ (cuối mỗi học kỳ) xuất file Excel từng lớp/môn từ mục *Sổ điểm*, và kiểm tra thời gian lưu lịch sử khôi phục (restore window) của gói Neon bạn đang dùng.
+* Thư viện đọc/ghi Excel (SheetJS) được tải từ `cdn.sheetjs.com`. Nếu muốn chạy hoàn toàn độc lập, hãy tải file `xlsx.mjs` về thư mục `public/assets/` và sửa hàm `loadXLSX()` trong `app.js` (rồi bỏ các domain CDN khỏi `Content-Security-Policy` trong `vercel.json`).
