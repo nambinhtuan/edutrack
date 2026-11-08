@@ -3,10 +3,11 @@ import { db } from "../db/index.js";
 import {
   classes, grades, parentStudents, sessions, students, subjects, teacherAssignments, users,
 } from "../db/schema.js";
+import { cleanDatabaseUrl } from "../db/index.js";
 import {
   clearCookie, createSession, destroySession, getSessionUser, hashPassword, normalizePhone,
   randomPassword, verifyPassword, easyParentPassword, DUMMY_HASH, type SessionUser,
-} from "./auth.js";
+} from "../lib/auth.js";
 
 class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -75,22 +76,56 @@ function parseCommentGrade(raw: unknown): { score: string; scoreText: string } |
   fail(400, `Giá trị "${raw}" không hợp lệ cho môn nhận xét (chỉ nhận Đ/1/Đạt hoặc CĐ/0/Chưa đạt).`);
 }
 
+// ---------- Kiểm tra tình trạng hệ thống (mở /api/health trên trình duyệt để chẩn đoán) ----------
+
+route("GET", "/api/health", async () => {
+  const raw = process.env.DATABASE_URL || "";
+  const out = { databaseUrl: Boolean(raw.trim()), urlFormat: "", connected: false, tablesReady: false, detail: "", directCheck: "", message: "" };
+  // Không bao giờ in chuỗi kết nối (có mật khẩu); chỉ mô tả dạng của nó.
+  const clean = (e: any) => `${e?.message ?? e} ${e?.cause?.message ?? ""}`.replace(/postgres(ql)?:\/\/\S+/gi, "[chuỗi kết nối]").slice(0, 300);
+  if (!out.databaseUrl) {
+    out.message = "Chưa khai báo biến DATABASE_URL trên Vercel (Settings → Environment Variables), sau đó cần Redeploy.";
+    return json(out);
+  }
+  const t = raw.trim();
+  out.urlFormat = /^psql\b/i.test(t) ? "BẮT ĐẦU BẰNG 'psql' (sai: chỉ lấy phần postgresql://...)"
+    : /^['"]/.test(t) ? "CÓ DẤU NHÁY ở đầu (sai: xoá dấu nháy)"
+    : !/^postgres(ql)?:\/\//i.test(t) ? "KHÔNG bắt đầu bằng postgresql:// (sai chuỗi)"
+    : /\s/.test(t) ? "có khoảng trắng bên trong (sai)" : "đúng dạng postgresql://...";
+  try { await db.execute(sql`select 1`); out.connected = true; }
+  catch (e) {
+    out.detail = clean(e);
+    // Thử gọi thẳng Neon (không qua thư viện) để phân biệt: sai chuỗi/mật khẩu hay lỗi thư viện.
+    try {
+      const u = new URL(cleanDatabaseUrl(raw));
+      const r = await fetch(`https://${u.hostname}/sql`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Neon-Connection-String": cleanDatabaseUrl(raw) },
+        body: JSON.stringify({ query: "select 1 as ok", params: [] }),
+      });
+      const txt = (await r.text()).replace(/postgres(ql)?:\/\/\S+/gi, "[chuỗi kết nối]").slice(0, 200);
+      out.directCheck = `HTTP ${r.status}: ${txt}`;
+    } catch (e2) { out.directCheck = `Không gọi được tới Neon: ${clean(e2)}`; }
+    out.message = "Có DATABASE_URL nhưng không kết nối được tới Neon. Xem mục urlFormat và detail để biết nguyên nhân, rồi dán lại chuỗi từ nút Connect của Neon.";
+    return json(out);
+  }
+  try { await db.select({ id: users.id }).from(users).limit(1); out.tablesReady = true; out.message = "Mọi thứ đều ổn."; }
+  catch (e) { out.detail = clean(e); out.message = "Kết nối Neon được nhưng database chưa có bảng dữ liệu: bước tạo bảng (migrate) khi build chưa thành công. Xem Build Logs của lần deploy trên Vercel."; }
+  return json(out);
+});
+
 // ---------- Khởi tạo & đăng nhập ----------
 
-// Nếu đặt biến môi trường SETUP_KEY, người khởi tạo phải nhập đúng mã này (chống người lạ chiếm quyền
-// Quản trị hệ thống khi website vừa được đưa lên mạng nhưng chủ chưa kịp khởi tạo).
-const setupKey = () => (process.env.SETUP_KEY || "").trim();
+// Người đầu tiên khởi tạo hệ thống (chưa có quản trị nào) tự động trở thành Quản trị hệ thống.
 
 route("GET", "/api/setup-status", async () => {
   const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
-  return json({ needsSetup: admins.length === 0, requiresKey: Boolean(setupKey()) });
+  return json({ needsSetup: admins.length === 0 });
 });
 
 route("POST", "/api/setup", async (c) => {
   const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
   if (admins.length) fail(409, "Hệ thống đã có tài khoản Quản trị hệ thống.");
-  const key = setupKey();
-  if (key && str(c.body.setupKey, 200) !== key) fail(403, "Mã khởi tạo không đúng.");
   const username = str(c.body.username, 50).toLowerCase();
   const fullName = str(c.body.fullName, 100);
   if (!/^[a-z0-9._-]{3,50}$/.test(username)) fail(400, "Tên đăng nhập 3–50 ký tự, chỉ gồm chữ không dấu, số, dấu . _ -");
@@ -844,7 +879,7 @@ async function handleRequest(req: Request, url: URL, body: any) {
     const m = path.match(match.pattern)!;
     const params: Record<string, string> = {};
     match.keys.forEach((k, i) => (params[k] = m[i + 1]));
-    const user = await getSessionUser(req);
+    const user = path === "/api/health" ? null : await getSessionUser(req);
     // Tài khoản đang dùng mật khẩu do hệ thống cấp phải đổi mật khẩu trước khi dùng bất kỳ chức năng nào khác.
     if (user?.mustChangePassword && !MUST_CHANGE_ALLOWED.includes(path))
       fail(403, "MUST_CHANGE_PASSWORD");
@@ -852,7 +887,13 @@ async function handleRequest(req: Request, url: URL, body: any) {
   } catch (err) {
     if (err instanceof HttpError) return json({ error: err.message }, { status: err.status });
     console.error(err);
-    return json({ error: "Lỗi máy chủ. Vui lòng thử lại." }, { status: 500 });
+    // Gợi ý rõ nguyên nhân cho các lỗi cấu hình thường gặp (không lộ thông tin nhạy cảm).
+    const msg = `${(err as any)?.message ?? ""} ${(err as any)?.cause?.message ?? ""}`;
+    let hint = "Lỗi máy chủ. Vui lòng thử lại.";
+    if (/DATABASE_URL/.test(msg)) hint = "Máy chủ chưa có biến DATABASE_URL. Hãy khai báo trên Vercel rồi Redeploy (mở /api/health để kiểm tra).";
+    else if (/relation .* does not exist/i.test(msg)) hint = "Database chưa có bảng dữ liệu (migrate chưa chạy thành công). Mở /api/health để xem hướng dẫn.";
+    else if (/fetch failed|ENOTFOUND|ECONNREFUSED|password authentication failed|Error connecting to database/i.test(msg)) hint = "Không kết nối được database. Kiểm tra lại DATABASE_URL (mở /api/health).";
+    return json({ error: hint }, { status: 500 });
   }
 }
 

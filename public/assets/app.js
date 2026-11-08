@@ -21,7 +21,11 @@ async function api(method, path, body) {
     body: method !== "GET" ? JSON.stringify(body ?? {}) : undefined,
     credentials: "same-origin",
   });
-  const data = await res.json().catch(() => ({}));
+  const raw = await res.text();
+  let data = {};
+  try { data = JSON.parse(raw); } catch { /* không phải JSON */ }
+  if (!res.ok && !data.error && (res.status === 404 || res.status >= 500))
+    data = { error: res.status === 404 ? "Không tìm thấy phần máy chủ (/api). Phần máy chủ có thể chưa được Vercel triển khai thành công." : `Máy chủ gặp sự cố (mã ${res.status}).` };
   if (res.status === 401 && path !== "/api/login" && path !== "/api/change-password") { me = null; render(); }
   if (res.status === 403 && data.error === "MUST_CHANGE_PASSWORD" && me) { me.mustChangePassword = true; render(); throw new Error("Bạn cần đổi mật khẩu trước khi tiếp tục."); }
   if (!res.ok) throw new Error(data.error || `Lỗi ${res.status}`);
@@ -104,11 +108,12 @@ async function boot() {
     const { user } = await api("GET", "/api/me");
     me = user;
     if (!me) {
-      const { needsSetup, requiresKey } = await api("GET", "/api/setup-status");
-      if (needsSetup) return renderSetup(requiresKey);
+      const { needsSetup } = await api("GET", "/api/setup-status");
+      if (needsSetup) return renderSetup();
     }
   } catch (e) {
-    app.innerHTML = `<div class="login"><div class="card"><div class="notice err">Không kết nối được máy chủ: ${esc(e.message)}</div></div></div>`;
+    app.innerHTML = `<div class="login"><div class="card"><div class="notice err">Không kết nối được máy chủ: ${esc(e.message)}</div>
+      <p>Mở <a href="/api/health" target="_blank">trang chẩn đoán /api/health</a> để xem nguyên nhân và cách khắc phục.</p></div></div>`;
     return;
   }
   render();
@@ -153,15 +158,14 @@ function loginFrame(inner) {
     ${inner}</div></div>`;
 }
 
-function renderSetup(requiresKey = false) {
-  loginFrame(`<h1>Khởi tạo hệ thống</h1>
-    <p>Tạo tài khoản <b>Quản trị hệ thống</b> đầu tiên. Tài khoản này có quyền cao nhất: phân quyền quản trị cho giáo viên, quản lý lớp, học sinh và môn học.</p>
+function renderSetup() {
+  loginFrame(`<h1>Chào mừng! Tạo tài khoản của bạn</h1>
+    <p>Bạn là người đầu tiên vào hệ thống nên sẽ trở thành <b>Quản trị hệ thống</b> (quyền cao nhất). Chỉ cần đặt tên đăng nhập và mật khẩu, sau đó bạn có thể thêm môn học, giáo viên và học sinh.</p>
     <form id="f">
-      <label class="field"><span>Họ và tên Quản trị hệ thống</span><input type="text" name="fullName" required placeholder="VD: Thầy Nguyễn Văn A"></label>
-      <label class="field"><span>Tên đăng nhập (chữ không dấu, số)</span><input type="text" name="username" required autocomplete="username" pattern="[A-Za-z0-9._\\-]{3,50}" placeholder="VD: admin"></label>
+      <label class="field"><span>Họ và tên của bạn</span><input type="text" name="fullName" placeholder="VD: Thầy Nguyễn Văn A"></label>
+      <label class="field"><span>Tên đăng nhập (chữ không dấu, không khoảng trắng)</span><input type="text" name="username" required autocomplete="username" pattern="[A-Za-z0-9._\\-]{3,50}" value="admin"></label>
       <label class="field"><span>Mật khẩu (ít nhất 8 ký tự)</span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
-      ${requiresKey ? `<label class="field"><span>Mã khởi tạo (biến SETUP_KEY đã khai báo trên Vercel)</span><input type="password" name="setupKey" required autocomplete="off"></label>` : ""}
-      <button class="btn">Tạo tài khoản Quản trị hệ thống</button>
+      <button class="btn">Tạo tài khoản và vào hệ thống</button>
     </form>`);
   $("#f").onsubmit = (e) => {
     e.preventDefault();
@@ -555,6 +559,16 @@ function semesterCommentResult(tx, gk, ck) {
   return passCount >= all.length / 2 ? "Đ" : "CĐ";
 }
 
+// Nhập nhanh không cần dấu phẩy: 85 -> 8,5 · 925 -> 9,25 · 7 -> 7 · 10 (hoặc 100) -> 10.
+// Chỉ áp dụng cho chuỗi gồm toàn chữ số; chuỗi có dấu phẩy/chấm được hiểu nguyên văn (8,5 / 9.25).
+function expandQuickDigits(t) {
+  if (t.length === 1) return t;
+  if (t === "10" || t === "100" || t === "1000") return "10";
+  if (t.length === 2) return `${t[0]}.${t[1]}`;
+  if (t.length === 3) return `${t[0]}.${t.slice(1)}`;
+  return null;
+}
+
 const fmt = (v) => (v === null || v === undefined ? "" : Number(v).toLocaleString("vi-VN", { maximumFractionDigits: 2 }));
 
 async function viewGrades(page) {
@@ -645,12 +659,19 @@ function renderGradeTable(body, data, ctx, setDirty) {
     return NaN;
   };
   const parseScoreInput = (raw) => {
-    const t = String(raw ?? "").trim().replace(",", ".");
+    let t = String(raw ?? "").trim().replace(",", ".");
     if (t === "") return null;
+    if (/^\d+$/.test(t)) { const e = expandQuickDigits(t); if (e === null) return NaN; t = e; }
     const n = Number(t);
     return Number.isFinite(n) && n >= 0 && n <= 10 && /^\d+(\.\d{1,2})?$/.test(t) ? n : NaN;
   };
   const parseVal = (raw) => (isComment ? parseCommentInput(raw) : parseScoreInput(raw));
+  // Khi rời ô / Enter: đổi "85" thành "8,5" để hiển thị đúng điểm.
+  const commit = (input) => {
+    if (isComment) return;
+    const v = parseScoreInput(input.value);
+    if (typeof v === "number" && !Number.isNaN(v)) input.value = fmt(v);
+  };
 
   const formatDisplay = (v) => {
     if (v == null || Number.isNaN(v)) return "";
@@ -675,11 +696,11 @@ function renderGradeTable(body, data, ctx, setDirty) {
         <div><b>${esc(data.class.name)}</b> · ${esc(ctx.subjectName.replace(" (chỉ xem)", ""))} · Học kỳ ${ctx.semester === 1 ? "I" : "II"} · ${esc(data.class.schoolYear)}
           ${isComment ? ` <span class="tag ok">Môn nhận xét</span>` : ` <span class="tag brand">Môn điểm số</span>`}
           ${canEdit ? "" : ` <span class="tag">Chỉ xem</span>`}</div>
-        <div class="actions">${canEdit ? `<button class="btn ghost small" id="addtx">+ Cột TX</button>` : ""}<button class="btn ghost small" id="xls">Xuất Excel</button></div>
+        <div class="actions">${canEdit ? `<button class="btn ghost small" id="addtx">+ Cột TX</button><button class="btn ghost small" id="tpl">Tải file mẫu</button><button class="btn small" id="imp">Nhập từ Excel</button>` : ""}<button class="btn ghost small" id="xls">Xuất Excel</button></div>
       </div>
       ${canEdit ? (isComment
-        ? `<div class="notice info" style="margin-bottom:10px;padding:8px 12px;font-size:13px">💡 <b>Cách nhập môn nhận xét:</b> Nhập <b>Đ</b> (hoặc gõ <b>1</b>, <b>D</b>, <b>Đạt</b>) hoặc <b>CĐ</b> (hoặc gõ <b>0</b>, <b>CD</b>, <b>Chưa đạt</b>). Nhấn Enter để xuống dòng.</div>`
-        : `<p class="muted" style="margin:0 0 10px;font-size:13px">Nhập điểm từ 0 đến 10 (VD: 8,5). Nhấn Enter để xuống dòng. Có thể dán cả cột điểm từ Excel vào ô đầu tiên.</p>`) : ""}
+        ? `<div class="notice info" style="margin-bottom:10px;padding:8px 12px;font-size:13px">💡 <b>Cách nhập môn nhận xét:</b> Nhập <b>Đ</b> (hoặc gõ <b>1</b>, <b>D</b>, <b>Đạt</b>) hoặc <b>CĐ</b> (hoặc gõ <b>0</b>, <b>CD</b>, <b>Chưa đạt</b>). Nhấn Enter để xuống dòng. <br>📥 <b>Nhập bằng Excel:</b> <b>Tải file mẫu</b> → điền Đ/CĐ → <b>Nhập từ Excel</b> → <b>Lưu điểm</b>.</div>`
+        : `<div class="notice info" style="margin-bottom:10px;padding:8px 12px;font-size:13px">⚡ <b>Nhập nhanh, không cần gõ dấu phẩy:</b> gõ <b>85</b> → 8,5 · <b>925</b> → 9,25 · <b>7</b> → 7 · <b>10</b> → 10. Nhấn Enter để xuống ô dưới. <br>📥 <b>Nhập bằng Excel:</b> bấm <b>Tải file mẫu</b> → điền điểm → bấm <b>Nhập từ Excel</b> → kiểm tra rồi bấm <b>Lưu điểm</b>. Cũng có thể copy cả cột điểm trong Excel rồi dán vào ô đầu tiên.</div>`) : ""}
       <div class="table-wrap"><table class="gradebook"><thead>
         <tr><th rowspan="2">#</th><th rowspan="2">Họ và tên</th><th class="num grp" colspan="${txCount}">Thường xuyên</th><th class="num grp" rowspan="2">GK</th><th class="num grp" rowspan="2">CK</th><th class="num" rowspan="2">${isComment ? "ĐG Học kỳ" : "ĐTB HK"}</th></tr>
         <tr>${Array.from({ length: txCount }, (_, i) => `<th class="num">TX${i + 1}</th>`).join("")}</tr></thead><tbody>
@@ -750,13 +771,87 @@ function renderGradeTable(body, data, ctx, setDirty) {
     updateAvg(sid);
   };
 
+  // Đọc file Excel (mẫu do hệ thống tạo) và điền vào bảng điểm. Chưa lưu: giáo viên kiểm tra rồi bấm "Lưu điểm".
+  // Ô trống trong file bị bỏ qua (không xoá điểm đang có). Học sinh được nhận diện theo Mã HS, nếu không có thì theo Họ và tên.
+  const importExcel = async (file) => {
+    const XLSX = await loadXLSX();
+    const wb = XLSX.read(await file.arrayBuffer());
+    const ws = wb.Sheets[wb.SheetNames.includes("SoDiem") ? "SoDiem" : wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: "" });
+    let hi = -1, cols = null;
+    for (let i = 0; i < Math.min(20, aoa.length); i++) {
+      const c = { tx: {} };
+      aoa[i].forEach((h, col) => {
+        const n = normHeader(h);
+        const m = /^tx(\d{1,2})$/.exec(n);
+        if (m) c.tx[+m[1]] = col;
+        else if (["gk", "giuaky", "diemgk"].includes(n)) c.gk ??= col;
+        else if (["ck", "cuoiky", "diemck"].includes(n)) c.ck ??= col;
+        else if (["mahs", "mahocsinh", "mshs"].includes(n)) c.code ??= col;
+        else if (["hovaten", "hoten", "hovatenhocsinh", "hotenhocsinh", "hoctenhocsinh"].includes(n)) c.name ??= col;
+      });
+      const hasScore = Object.keys(c.tx).length || c.gk !== undefined || c.ck !== undefined;
+      if (hasScore && (c.code !== undefined || c.name !== undefined)) { hi = i; cols = c; break; }
+    }
+    if (hi < 0) throw new Error('Không nhận ra dòng tiêu đề. Hãy dùng "Tải file mẫu" rồi điền điểm vào các cột TX1, TX2…, GK, CK (giữ nguyên cột Mã HS hoặc Họ và tên).');
+
+    const byCode = new Map(students.map((s) => [String(s.studentCode).trim().toLowerCase(), s]));
+    const nameKey = (v) => normHeader(v);
+    const nameCount = new Map();
+    students.forEach((s) => nameCount.set(nameKey(s.fullName), (nameCount.get(nameKey(s.fullName)) || 0) + 1));
+    const byName = new Map(students.map((s) => [nameKey(s.fullName), s]));
+
+    const wanted = Object.keys(cols.tx).map(Number).filter((n) => n >= 1 && n <= 10);
+    const needTx = Math.max(0, ...wanted);
+    if (needTx > txCount) { txCount = needTx; draw(); }
+
+    const targets = [];
+    wanted.forEach((n) => targets.push({ kind: "tx", slot: n, col: cols.tx[n], label: `TX${n}` }));
+    if (cols.gk !== undefined) targets.push({ kind: "gk", slot: 1, col: cols.gk, label: "GK" });
+    if (cols.ck !== undefined) targets.push({ kind: "ck", slot: 1, col: cols.ck, label: "CK" });
+
+    let filled = 0;
+    const hit = new Set(), errors = [], unmatched = [];
+    for (let i = hi + 1; i < aoa.length; i++) {
+      const r = aoa[i];
+      const code = cols.code !== undefined ? cellText(r[cols.code]).toLowerCase() : "";
+      const nm = cols.name !== undefined ? cellText(r[cols.name]) : "";
+      if (!code && !nm) continue;
+      let st = code ? byCode.get(code) : null;
+      if (!st && nm && nameCount.get(nameKey(nm)) === 1) st = byName.get(nameKey(nm));
+      if (!st) { unmatched.push(`Dòng ${i + 1}: ${nm || code}${nm && nameCount.get(nameKey(nm)) > 1 ? " (trùng tên trong lớp, cần cột Mã HS)" : ""}`); continue; }
+      for (const t of targets) {
+        const raw = r[t.col];
+        if (raw === "" || raw === null || raw === undefined) continue;
+        const rawStr = typeof raw === "number" ? String(Math.round(raw * 100) / 100) : String(raw).trim();
+        if (rawStr === "") continue;
+        if (Number.isNaN(parseVal(rawStr))) { errors.push(`Dòng ${i + 1} (${st.fullName}), ${t.label}: "${rawStr}" không hợp lệ`); continue; }
+        const input = $(`input.score[data-sid="${st.id}"][data-kind="${t.kind}"][data-slot="${t.slot}"]`, body);
+        if (!input) continue;
+        input.value = rawStr; setValue(input, rawStr); commit(input);
+        filled++; hit.add(st.id);
+      }
+    }
+    refreshDirty();
+    const list = (title, arr) => arr.length ? `<div class="notice warn"><b>${title} (${arr.length}):</b><ul>${arr.slice(0, 30).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>${arr.length > 30 ? `<small>… và ${arr.length - 30} mục khác</small>` : ""}</div>` : "";
+    openModal(`<h2>Kết quả đọc file Excel</h2>
+      <div class="notice ${filled ? "ok" : "warn"}">${filled
+        ? `Đã điền <b>${filled}</b> ô điểm cho <b>${hit.size}</b> học sinh. Hãy kiểm tra lại bảng điểm rồi bấm <b>Lưu điểm</b> (ô trống trong file được bỏ qua, không xoá điểm cũ).`
+        : "Không có ô điểm nào được điền. Kiểm tra lại file (các ô điểm đang trống hoặc không đúng lớp)."}</div>
+      ${list("Ô không hợp lệ, đã bỏ qua", errors)}${list("Không tìm thấy học sinh trong lớp này", unmatched)}
+      <div class="actions"><button class="btn" value="ok">Đóng</button></div>`);
+  };
+
   const bind = () => {
     const inputs = $$("input.score", body);
     inputs.forEach((input) => {
       input.oninput = () => { setValue(input, input.value); refreshDirty(); };
+      input.onfocus = () => input.select();
+      input.onblur = () => commit(input);
       input.onkeydown = (e) => {
         if (e.key === "Enter" || e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
+          commit(input);
           const col = inputs.filter((x) => x.dataset.kind === input.dataset.kind && x.dataset.slot === input.dataset.slot);
           const next = col[col.indexOf(input) + (e.key === "ArrowUp" ? -1 : 1)];
           if (next) { next.focus(); next.select(); }
@@ -776,12 +871,24 @@ function renderGradeTable(body, data, ctx, setDirty) {
           if (!tr) return;
           line.split("\t").forEach((val, j) => {
             const target = rowInputs(tr)[startCol + j];
-            if (target) { target.value = val.trim(); setValue(target, val); }
+            if (target) { target.value = val.trim(); setValue(target, val); commit(target); }
           });
         });
         refreshDirty();
       };
     });
+    const tpl = $("#tpl", body);
+    if (tpl) tpl.onclick = () => attempt(() => downloadXlsx(
+      `Mau_nhap_diem_${data.class.name}_${ctx.subjectName.replace(" (chỉ xem)", "")}_HK${ctx.semester}.xlsx`.replace(/[\\/:*?"<>|\s]+/g, "_"),
+      [["STT", "Mã HS", "Họ và tên", ...Array.from({ length: txCount }, (_, i) => `TX${i + 1}`), "GK", "CK"],
+        ...students.map((s, i) => [i + 1, s.studentCode, s.fullName, ...Array(txCount).fill(""), "", ""])], "SoDiem"));
+    const imp = $("#imp", body);
+    if (imp) imp.onclick = () => {
+      const f = document.createElement("input");
+      f.type = "file"; f.accept = ".xlsx,.xls,.csv";
+      f.onchange = () => { if (f.files[0]) attempt(() => importExcel(f.files[0])); };
+      f.click();
+    };
     const add = $("#addtx", body);
     if (add) add.onclick = () => {
       if (txCount >= 10) return toast("Tối đa 10 cột thường xuyên.", true);
